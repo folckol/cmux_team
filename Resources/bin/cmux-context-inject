@@ -80,6 +80,28 @@ for u in d.get('users', []):
     fi
 fi
 
+# Recent team activity (last 15 events)
+events_data=$(rpc_call "context.event.list" '{"limit":15}')
+if [ -n "$events_data" ]; then
+    events_count=$(echo "$events_data" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(len(d.get('events',[])))" 2>/dev/null || echo "0")
+    if [ "$events_count" -gt 0 ]; then
+        output+="## Recent Team Activity (latest 15)\n\n"
+        output+=$(echo "$events_data" | python3 -c "
+import sys, json, time
+d = json.loads(sys.stdin.read())
+for e in d.get('events', []):
+    ts = e.get('ts', 0)
+    age_min = int((time.time() - ts) / 60)
+    age = f'{age_min}m ago' if age_min < 60 else f'{age_min // 60}h ago'
+    uid = (e.get('user_id','') or '?')[:8]
+    summary = e.get('summary', '')
+    tail = f' — {summary}' if summary else ''
+    print(f'- [{age}] {uid} {e.get(\"action\",\"\")} {e.get(\"kind\",\"\")} {e.get(\"target_id\",\"\")[:16]}{tail}')
+" 2>/dev/null)
+        output+="\n\n"
+    fi
+fi
+
 # Active edit locks
 lock_data=$(rpc_call "context.lock.list" '{}')
 if [ -n "$lock_data" ]; then

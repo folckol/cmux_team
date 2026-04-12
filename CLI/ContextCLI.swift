@@ -76,6 +76,32 @@ enum ContextCLI {
                 print("\(id.prefix(8))  \(name)\(role.isEmpty ? "" : " — \(role)")")
             }
             return 0
+        case "events":
+            let limit = Int(extractFlag(args: Array(args.dropFirst()), flag: "-n") ?? "") ?? 20
+            let userFilter = extractFlag(args: Array(args.dropFirst()), flag: "--user") ?? ""
+            guard let resp = rpcCall(socketPath: socketPath, method: "context.event.list", params: [
+                "limit": limit, "user_id": userFilter
+            ] as [String: Any]),
+                  let events = resp["events"] as? [[String: Any]] else {
+                fputs("Error: could not list events\n", stderr)
+                return 1
+            }
+            if events.isEmpty { print("No events yet"); return 0 }
+            let fmt = DateFormatter()
+            fmt.dateFormat = "MM-dd HH:mm"
+            for e in events {
+                let ts = (e["ts"] as? Int64) ?? Int64(e["ts"] as? Int ?? 0)
+                let uid = e["user_id"] as? String ?? ""
+                let action = e["action"] as? String ?? ""
+                let kind = e["kind"] as? String ?? ""
+                let target = e["target_id"] as? String ?? ""
+                let summary = e["summary"] as? String ?? ""
+                let date = fmt.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+                let who = uid.isEmpty ? "?" : String(uid.prefix(8))
+                let tail = summary.isEmpty ? target : "\(target) — \(summary)"
+                print("\(date)  \(who)  \(action) \(kind) \(tail)")
+            }
+            return 0
         case "locks":
             guard let resp = rpcCall(socketPath: socketPath, method: "context.lock.list", params: [:]),
                   let locks = resp["locks"] as? [[String: Any]] else {
@@ -674,6 +700,7 @@ enum ContextCLI {
 
           whoami                            Show the current identity (from .cmux_team/me.json)
           users                             List all users
+          events [-n 20] [--user <id>]      Recent activity log (who changed what)
           locks                             List active edit locks
 
           export                            Export all context as JSON
