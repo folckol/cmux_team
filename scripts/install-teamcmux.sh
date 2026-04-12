@@ -61,6 +61,13 @@ codesign --force --deep --sign - "$DEST" 2>/dev/null || true
 
 xattr -dr com.apple.quarantine "$DEST" || true
 
+# Регистрируем в LaunchServices и Spotlight, иначе Finder/Spotlight не увидит по имени.
+LSREG="/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister"
+if [[ -x "$LSREG" ]]; then
+    "$LSREG" -f "$DEST" >/dev/null 2>&1 || true
+fi
+mdimport "$DEST" >/dev/null 2>&1 || true
+
 echo "==> [5/5] Launching"
 open "$DEST"
 
