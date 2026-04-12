@@ -491,6 +491,8 @@ extension Workspace {
             terminalSnapshot = nil
             browserSnapshot = nil
             markdownSnapshot = SessionMarkdownPanelSnapshot(filePath: markdownPanel.filePath)
+        case .context:
+            return nil
         }
 
         return SessionPanelSnapshot(
@@ -681,6 +683,8 @@ extension Workspace {
             }
             applySessionPanelMetadata(snapshot, toPanelId: markdownPanel.id)
             return markdownPanel.id
+        case .context:
+            return nil
         }
     }
 
@@ -7258,6 +7262,8 @@ final class Workspace: Identifiable, ObservableObject {
             return SurfaceKind.browser
         case .markdown:
             return SurfaceKind.markdown
+        case .context:
+            return "context"
         }
     }
 
@@ -9221,6 +9227,69 @@ final class Workspace: Identifiable, ObservableObject {
 
         installMarkdownPanelSubscription(markdownPanel)
         return markdownPanel
+    }
+
+    /// Open a Context panel as a split pane alongside the current terminal.
+    @discardableResult
+    func newContextSplit(
+        from panelId: UUID,
+        orientation: SplitOrientation,
+        insertFirst: Bool = false,
+        contextStore: ContextStore,
+        focus: Bool = true
+    ) -> ContextPanel? {
+        guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
+        var sourcePaneId: PaneID?
+        for paneId in bonsplitController.allPaneIds {
+            let tabs = bonsplitController.tabs(inPane: paneId)
+            if tabs.contains(where: { $0.id == sourceTabId }) {
+                sourcePaneId = paneId
+                break
+            }
+        }
+
+        guard let paneId = sourcePaneId else { return nil }
+
+        let contextPanel = ContextPanel(workspaceId: id, contextStore: contextStore, projectRoot: currentDirectory)
+        panels[contextPanel.id] = contextPanel
+        panelTitles[contextPanel.id] = contextPanel.displayTitle
+
+        let newTab = Bonsplit.Tab(
+            title: contextPanel.displayTitle,
+            icon: contextPanel.displayIcon,
+            kind: "context",
+            isDirty: false,
+            isLoading: false,
+            isPinned: false
+        )
+        surfaceIdToPanelId[newTab.id] = contextPanel.id
+        let previousFocusedPanelId = focusedPanelId
+
+        isProgrammaticSplit = true
+        defer { isProgrammaticSplit = false }
+        guard bonsplitController.splitPane(paneId, orientation: orientation, withTab: newTab, insertFirst: insertFirst) != nil else {
+            surfaceIdToPanelId.removeValue(forKey: newTab.id)
+            panels.removeValue(forKey: contextPanel.id)
+            panelTitles.removeValue(forKey: contextPanel.id)
+            return nil
+        }
+
+        let previousHostedView = focusedTerminalPanel?.hostedView
+        if focus {
+            previousHostedView?.suppressReparentFocus()
+            focusPanel(contextPanel.id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                previousHostedView?.clearSuppressReparentFocus()
+            }
+        } else {
+            preserveFocusAfterNonFocusSplit(
+                preferredPanelId: previousFocusedPanelId,
+                splitPanelId: contextPanel.id,
+                previousHostedView: previousHostedView
+            )
+        }
+
+        return contextPanel
     }
 
     @discardableResult
@@ -11529,7 +11598,7 @@ extension Workspace: BonsplitDelegate {
         switch intent {
         case .browser(.addressBar), .browser(.findField), .terminal(.findField):
             return true
-        case .panel, .browser(.webView), .terminal(.surface):
+        case .panel, .browser(.webView), .terminal(.surface), .context:
             return false
         }
     }

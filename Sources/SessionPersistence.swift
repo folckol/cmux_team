@@ -177,6 +177,8 @@ enum SessionSidebarSelection: String, Codable, Sendable, Equatable {
             self = .tabs
         case .notifications:
             self = .notifications
+        case .context:
+            self = .tabs
         }
     }
 

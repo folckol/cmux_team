@@ -1799,6 +1799,7 @@ struct ContentView: View {
     @EnvironmentObject var sidebarState: SidebarState
     @EnvironmentObject var sidebarSelectionState: SidebarSelectionState
     @EnvironmentObject var cmuxConfigStore: CmuxConfigStore
+    @EnvironmentObject var contextStore: ContextStore
     @State private var sidebarWidth: CGFloat = 200
     @State private var hoveredResizerHandles: Set<SidebarResizerHandle> = []
     @State private var isResizerDragging = false
@@ -2675,6 +2676,11 @@ struct ContentView: View {
                 .opacity(sidebarSelectionState.selection == .notifications ? 1 : 0)
                 .allowsHitTesting(sidebarSelectionState.selection == .notifications)
                 .accessibilityHidden(sidebarSelectionState.selection != .notifications)
+
+            ContextSidebarSection(store: contextStore)
+                .opacity(sidebarSelectionState.selection == .context ? 1 : 0)
+                .allowsHitTesting(sidebarSelectionState.selection == .context)
+                .accessibilityHidden(sidebarSelectionState.selection != .context)
         }
         .padding(.top, effectiveTitlebarPadding)
         .overlay(alignment: .top) {
@@ -6035,6 +6041,8 @@ struct ContentView: View {
             return String(localized: "commandPalette.kind.browser", defaultValue: "Browser")
         case .markdown:
             return String(localized: "commandPalette.kind.markdown", defaultValue: "Markdown")
+        case .context:
+            return String(localized: "commandPalette.kind.context", defaultValue: "Context")
         }
     }
 
@@ -6046,6 +6054,8 @@ struct ContentView: View {
             return ["browser", "web", "page"]
         case .markdown:
             return ["markdown", "note", "preview"]
+        case .context:
+            return ["context", "knowledge", "team"]
         }
     }
 
@@ -6149,6 +6159,8 @@ struct ContentView: View {
             return .toggleSidebar
         case "palette.showNotifications":
             return .showNotifications
+        case "palette.showContext":
+            return nil
         case "palette.jumpUnread":
             return .jumpToUnread
         case "palette.renameTab":
@@ -6498,6 +6510,14 @@ struct ContentView: View {
                 title: constant(String(localized: "command.showNotifications.title", defaultValue: "Show Notifications")),
                 subtitle: constant(String(localized: "command.showNotifications.subtitle", defaultValue: "Notifications")),
                 keywords: ["notifications", "inbox"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.showContext",
+                title: constant(String(localized: "command.showContext.title", defaultValue: "Show Team Context")),
+                subtitle: constant(String(localized: "command.showContext.subtitle", defaultValue: "Context")),
+                keywords: ["context", "knowledge", "team", "kv", "graph"]
             )
         )
         contributions.append(
@@ -7178,6 +7198,9 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.showNotifications") {
             AppDelegate.shared?.toggleNotificationsPopover(animated: false)
+        }
+        registry.register(commandId: "palette.showContext") {
+            AppDelegate.shared?.toggleContextPanel()
         }
         registry.register(commandId: "palette.jumpUnread") {
             AppDelegate.shared?.jumpToLatestUnread()
@@ -8259,6 +8282,8 @@ struct ContentView: View {
             return "browser.addressBar"
         case .browser(.findField):
             return "browser.findField"
+        case .context(let intent):
+            return "context.\(intent)"
         }
     }
 
@@ -14949,6 +14974,7 @@ private final class MiddleClickCaptureView: NSView {
 enum SidebarSelection {
     case tabs
     case notifications
+    case context
 }
 
 private struct ClearScrollBackground: ViewModifier {

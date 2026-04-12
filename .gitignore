@@ -12,6 +12,9 @@ xcuserdata/
 .env
 .envrc
 
+# cmux team context local config (contains auth token)
+.cmux_team/
+
 # Swift Package Manager
 .swiftpm/
 
@@ -47,3 +50,4 @@ tests/visual_report.html
 # Local scratch (screenshots, etc.)
 tmp/
 tmp-*/
+.idea/

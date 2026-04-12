@@ -55,6 +55,16 @@ struct PanelContentView: View {
                     onRequestPanelFocus: onRequestPanelFocus
                 )
             }
+        case .context:
+            if let contextPanel = panel as? ContextPanel {
+                ContextPanelView(
+                    panel: contextPanel,
+                    isFocused: isFocused,
+                    isVisibleInUI: isVisibleInUI,
+                    portalPriority: portalPriority,
+                    onRequestPanelFocus: onRequestPanelFocus
+                )
+            }
         }
     }
 }

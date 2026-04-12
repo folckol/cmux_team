@@ -2812,6 +2812,9 @@ struct CMUXCLI {
                 windowOverride: windowId
             )
 
+        case "context":
+            exit(ContextCLI.run(args: commandArgs))
+
         case "help":
             print(usage())
 

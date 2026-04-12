@@ -39,6 +39,17 @@
 		A5001421 /* MarkdownPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001419 /* MarkdownPanelView.swift */; };
 		A5001290 /* MarkdownUI in Frameworks */ = {isa = PBXBuildFile; productRef = A5001291 /* MarkdownUI */; };
 		A5001405 /* PanelContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001415 /* PanelContentView.swift */; };
+		A5001661 /* ContextModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001660 /* ContextModels.swift */; };
+		A5001663 /* ContextRPCClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001662 /* ContextRPCClient.swift */; };
+		A5001665 /* ContextStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001664 /* ContextStore.swift */; };
+		A5001667 /* ContextDaemonLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001666 /* ContextDaemonLifecycle.swift */; };
+		A5001669 /* ContextConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001668 /* ContextConfig.swift */; };
+		A5001675 /* ContextWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001674 /* ContextWindowController.swift */; };
+		A500166B /* ContextDropHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = A500166A /* ContextDropHandler.swift */; };
+		A500166D /* ContextPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A500166C /* ContextPanel.swift */; };
+		A500166F /* ContextPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A500166E /* ContextPanelView.swift */; };
+		A5001671 /* ContextSidebarSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001670 /* ContextSidebarSection.swift */; };
+		A5001673 /* ContextCLI.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001672 /* ContextCLI.swift */; };
 		A5001406 /* Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001416 /* Workspace.swift */; };
 		A5001407 /* WorkspaceContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001417 /* WorkspaceContentView.swift */; };
 			A5001093 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001090 /* AppDelegate.swift */; };
@@ -241,6 +252,16 @@
 		A5001415 /* PanelContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/PanelContentView.swift; sourceTree = "<group>"; };
 		A5001418 /* MarkdownPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/MarkdownPanel.swift; sourceTree = "<group>"; };
 		A5001419 /* MarkdownPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/MarkdownPanelView.swift; sourceTree = "<group>"; };
+		A5001660 /* ContextModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Context/ContextModels.swift; sourceTree = "<group>"; };
+		A5001662 /* ContextRPCClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Context/ContextRPCClient.swift; sourceTree = "<group>"; };
+		A5001664 /* ContextStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Context/ContextStore.swift; sourceTree = "<group>"; };
+		A5001666 /* ContextDaemonLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Context/ContextDaemonLifecycle.swift; sourceTree = "<group>"; };
+		A5001668 /* ContextConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Context/ContextConfig.swift; sourceTree = "<group>"; };
+		A5001674 /* ContextWindowController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Context/ContextWindowController.swift; sourceTree = "<group>"; };
+		A500166A /* ContextDropHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Context/ContextDropHandler.swift; sourceTree = "<group>"; };
+		A500166C /* ContextPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/ContextPanel.swift; sourceTree = "<group>"; };
+		A500166E /* ContextPanelView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panels/ContextPanelView.swift; sourceTree = "<group>"; };
+		A5001670 /* ContextSidebarSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextSidebarSection.swift; sourceTree = "<group>"; };
 		A5001416 /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		A5001417 /* WorkspaceContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceContentView.swift; sourceTree = "<group>"; };
 		A5001090 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
@@ -285,6 +306,7 @@
 		D1BEF00001A1B2C3D4E5F719 /* open */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "Resources/bin/open"; sourceTree = SOURCE_ROOT; };
 		A5002001 /* THIRD_PARTY_LICENSES.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = THIRD_PARTY_LICENSES.md; sourceTree = SOURCE_ROOT; };
 		B9000001A1B2C3D4E5F60719 /* cmux.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = cmux.swift; sourceTree = "<group>"; };
+		A5001672 /* ContextCLI.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContextCLI.swift; sourceTree = "<group>"; };
 		B9000004A1B2C3D4E5F60719 /* cmux */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = cmux; sourceTree = BUILT_PRODUCTS_DIR; };
 		D1320AA0D1320AA0D1320AA5 /* CmuxDockTilePlugin.plugin */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CmuxDockTilePlugin.plugin; sourceTree = BUILT_PRODUCTS_DIR; };
 				B9000011A1B2C3D4E5F60719 /* AutomationSocketUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationSocketUITests.swift; sourceTree = "<group>"; };
@@ -496,8 +518,18 @@
 				A5007421 /* BrowserPopupWindowController.swift */,
 				A5001418 /* MarkdownPanel.swift */,
 				A5001419 /* MarkdownPanelView.swift */,
+				A500166C /* ContextPanel.swift */,
+				A500166E /* ContextPanelView.swift */,
 				A5001510 /* CmuxWebView.swift */,
 				A5001415 /* PanelContentView.swift */,
+				A5001660 /* ContextModels.swift */,
+				A5001662 /* ContextRPCClient.swift */,
+				A5001664 /* ContextStore.swift */,
+				A5001666 /* ContextDaemonLifecycle.swift */,
+				A5001668 /* ContextConfig.swift */,
+				A500166A /* ContextDropHandler.swift */,
+				A5001670 /* ContextSidebarSection.swift */,
+				A5001674 /* ContextWindowController.swift */,
 				A5001211 /* UpdateController.swift */,
 				A5001212 /* UpdateDelegate.swift */,
 				A5001213 /* UpdateDriver.swift */,
@@ -526,6 +558,7 @@
 			isa = PBXGroup;
 			children = (
 				B9000001A1B2C3D4E5F60719 /* cmux.swift */,
+				A5001672 /* ContextCLI.swift */,
 			);
 			path = CLI;
 			sourceTree = "<group>";
@@ -821,8 +854,18 @@
 				A5007420 /* BrowserPopupWindowController.swift in Sources */,
 				A5001420 /* MarkdownPanel.swift in Sources */,
 				A5001421 /* MarkdownPanelView.swift in Sources */,
+				A500166D /* ContextPanel.swift in Sources */,
+				A500166F /* ContextPanelView.swift in Sources */,
 				A5001500 /* CmuxWebView.swift in Sources */,
 				A5001405 /* PanelContentView.swift in Sources */,
+				A5001661 /* ContextModels.swift in Sources */,
+				A5001663 /* ContextRPCClient.swift in Sources */,
+				A5001665 /* ContextStore.swift in Sources */,
+				A5001667 /* ContextDaemonLifecycle.swift in Sources */,
+				A5001669 /* ContextConfig.swift in Sources */,
+				A500166B /* ContextDropHandler.swift in Sources */,
+				A5001671 /* ContextSidebarSection.swift in Sources */,
+				A5001675 /* ContextWindowController.swift in Sources */,
 				A5001201 /* UpdateController.swift in Sources */,
 				A5001202 /* UpdateDelegate.swift in Sources */,
 				A5001203 /* UpdateDriver.swift in Sources */,
@@ -921,6 +964,7 @@
 			files = (
 				B9000002A1B2C3D4E5F60719 /* cmux.swift in Sources */,
 				B9000027A1B2C3D4E5F60719 /* RemoteRelayZshBootstrap.swift in Sources */,
+				A5001673 /* ContextCLI.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

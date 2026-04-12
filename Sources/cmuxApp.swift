@@ -140,6 +140,7 @@ struct cmuxApp: App {
     @StateObject private var sidebarState = SidebarState()
     @StateObject private var sidebarSelectionState = SidebarSelectionState()
     @StateObject private var cmuxConfigStore = CmuxConfigStore()
+    @StateObject private var contextStore = ContextStore()
     @StateObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     private let primaryWindowId = UUID()
     @AppStorage(AppearanceSettings.appearanceModeKey) private var appearanceMode = AppearanceSettings.defaultMode.rawValue
@@ -324,6 +325,7 @@ struct cmuxApp: App {
                 .environmentObject(sidebarState)
                 .environmentObject(sidebarSelectionState)
                 .environmentObject(cmuxConfigStore)
+                .environmentObject(contextStore)
                 .onAppear {
 #if DEBUG
                     if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
@@ -333,6 +335,13 @@ struct cmuxApp: App {
                     // Start the Unix socket controller for programmatic access
                     updateSocketController()
                     appDelegate.configure(tabManager: tabManager, notificationStore: notificationStore, sidebarState: sidebarState)
+                    appDelegate.contextStore = contextStore
+                    // Start context daemon if binary exists
+                    if appDelegate.contextDaemonLifecycle == nil {
+                        let lifecycle = ContextDaemonLifecycle()
+                        lifecycle.start()
+                        appDelegate.contextDaemonLifecycle = lifecycle
+                    }
                     cmuxConfigStore.wireDirectoryTracking(tabManager: tabManager)
                     cmuxConfigStore.loadAll()
                     applyAppearance()
@@ -423,6 +432,12 @@ struct cmuxApp: App {
                 splitCommandButton(title: String(localized: "menu.notifications.show", defaultValue: "Show Notifications"), shortcut: menuShortcut(for: .showNotifications)) {
                     showNotificationsPopover()
                 }
+
+                splitCommandButton(title: String(localized: "menu.context.toggle", defaultValue: "Toggle Context Panel"), shortcut: menuShortcut(for: .toggleContextPanel)) {
+                    appDelegate.toggleContextPanel()
+                }
+
+                Divider()
 
                 splitCommandButton(title: String(localized: "menu.notifications.jumpToUnread", defaultValue: "Jump to Latest Unread"), shortcut: menuShortcut(for: .jumpToUnread)) {
                     appDelegate.jumpToLatestUnread()
@@ -812,6 +827,10 @@ struct cmuxApp: App {
 
                 splitCommandButton(title: String(localized: "menu.view.showNotifications", defaultValue: "Show Notifications"), shortcut: menuShortcut(for: .showNotifications)) {
                     showNotificationsPopover()
+                }
+
+                splitCommandButton(title: String(localized: "menu.view.toggleContextPanel", defaultValue: "Toggle Context Panel"), shortcut: menuShortcut(for: .toggleContextPanel)) {
+                    appDelegate.toggleContextPanel()
                 }
             }
         }

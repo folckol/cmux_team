@@ -206,9 +206,25 @@ fi
 # - PreToolUse: clears "Needs input" when Claude resumes after permission grant (async to avoid latency)
 HOOKS_JSON='{"hooks":{"SessionStart":[{"matcher":"","hooks":[{"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" claude-hook session-start","timeout":10}]}],"Stop":[{"matcher":"","hooks":[{"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" claude-hook stop","timeout":10}]}],"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" claude-hook session-end","timeout":1}]}],"Notification":[{"matcher":"","hooks":[{"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" claude-hook notification","timeout":10}]}],"UserPromptSubmit":[{"matcher":"","hooks":[{"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" claude-hook prompt-submit","timeout":10}]}],"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"\"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}\" claude-hook pre-tool-use","timeout":5,"async":true}]}]}}'
 
+# Inject team context if daemon is running and auto-inject is enabled
+CONTEXT_INJECT_ARGS=()
+if [[ "${CMUX_CONTEXT_AUTO_INJECT:-1}" == "1" ]]; then
+    INJECT_SCRIPT="$(cd "$(dirname "$0")" && pwd)/cmux-context-inject"
+    if [[ -x "$INJECT_SCRIPT" ]]; then
+        CONTEXT_FILE="/tmp/cmux-context-inject-$$.md"
+        if "$INJECT_SCRIPT" > "$CONTEXT_FILE" 2>/dev/null && [[ -s "$CONTEXT_FILE" ]]; then
+            CONTEXT_INJECT_ARGS=(--append-system-prompt "$(cat "$CONTEXT_FILE")")
+            # Clean up on exit
+            trap 'rm -f "$CONTEXT_FILE"' EXIT
+        else
+            rm -f "$CONTEXT_FILE"
+        fi
+    fi
+fi
+
 if [[ "$SKIP_SESSION_ID" == true ]]; then
-    exec "$REAL_CLAUDE" --settings "$HOOKS_JSON" "$@"
+    exec "$REAL_CLAUDE" --settings "$HOOKS_JSON" "${CONTEXT_INJECT_ARGS[@]}" "$@"
 else
     SESSION_ID="$(uuidgen | tr '[:upper:]' '[:lower:]')"
-    exec "$REAL_CLAUDE" --session-id "$SESSION_ID" --settings "$HOOKS_JSON" "$@"
+    exec "$REAL_CLAUDE" --session-id "$SESSION_ID" --settings "$HOOKS_JSON" "${CONTEXT_INJECT_ARGS[@]}" "$@"
 fi

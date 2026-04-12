@@ -2277,6 +2277,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     weak var sidebarState: SidebarState?
     weak var fullscreenControlsViewModel: TitlebarControlsViewModel?
     weak var sidebarSelectionState: SidebarSelectionState?
+    var contextStore: ContextStore?
+    var contextDaemonLifecycle: ContextDaemonLifecycle?
     var shortcutLayoutCharacterProvider: (UInt16, NSEvent.ModifierFlags) -> String? = KeyboardLayout.character(forKeyCode:modifierFlags:)
     private var workspaceObserver: NSObjectProtocol?
     private var lifecycleSnapshotObservers: [NSObjectProtocol] = []
@@ -3005,6 +3007,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             PostHogAnalytics.shared.flush()
         }
         notificationStore?.clearAll()
+        contextDaemonLifecycle?.stop()
         enableSuddenTerminationIfNeeded()
     }
 
@@ -4437,6 +4440,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 hasher.combine(0)
             case .notifications:
                 hasher.combine(1)
+            case .context:
+                hasher.combine(2)
             }
 
             if let window = context.window ?? windowForMainWindowId(context.windowId) {
@@ -7100,12 +7105,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         cmuxConfigStore.wireDirectoryTracking(tabManager: tabManager)
         cmuxConfigStore.loadAll()
 
+        // Start context daemon if not running
+        if contextDaemonLifecycle == nil {
+            let lifecycle = ContextDaemonLifecycle()
+            lifecycle.start()
+            contextDaemonLifecycle = lifecycle
+        }
+        if contextStore == nil {
+            contextStore = ContextStore()
+        }
+
         let root = ContentView(updateViewModel: updateViewModel, windowId: windowId)
             .environmentObject(tabManager)
             .environmentObject(notificationStore)
             .environmentObject(sidebarState)
             .environmentObject(sidebarSelectionState)
             .environmentObject(cmuxConfigStore)
+            .environmentObject(contextStore!)
 
         // Use the current key window's size for new windows so Cmd+Shift+N
         // creates a window matching the previous one's dimensions.
@@ -10159,6 +10175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             switch sidebarSelection {
             case .tabs: return "tabs"
             case .notifications: return "notifications"
+            case .context: return "context"
             }
         }()
         writeMultiWindowNotificationTestData([
@@ -10178,6 +10195,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     func applyWindowDecorations(to window: NSWindow) {
         windowDecorationsController.apply(to: window)
+    }
+
+    func toggleContextPanel() {
+        guard let tabManager, let contextStore,
+              let workspace = tabManager.selectedWorkspace else { return }
+
+        // Close existing context panel
+        for (_, panel) in workspace.panels {
+            if panel.panelType == .context {
+                _ = workspace.closePanel(panel.id)
+                return
+            }
+        }
+
+        // Open as split
+        guard let focusedPanelId = workspace.focusedPanelId else { return }
+        workspace.newContextSplit(from: focusedPanelId, orientation: .horizontal, contextStore: contextStore)
     }
 
     func toggleNotificationsPopover(animated: Bool = true, anchorView: NSView? = nil) {
@@ -10967,6 +11001,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         if activeConfiguredShortcutChordPrefixForCurrentEvent == nil,
            armConfiguredShortcutChordIfNeeded(event: event) {
+            return true
+        }
+
+        if matchConfiguredShortcut(event: event, action: .toggleContextPanel) {
+#if DEBUG
+            dlog("shortcut.action name=toggleContextPanel \(debugShortcutRouteSnapshot(event: event))")
+#endif
+            toggleContextPanel()
             return true
         }
 

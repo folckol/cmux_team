@@ -1,0 +1,158 @@
+#!/bin/bash
+# cmux-context-inject: generates a context summary for AI agent injection.
+# Called before launching Claude Code in a cmux workspace.
+# Outputs markdown to stdout that can be appended to CLAUDE.md or passed as --context-file.
+
+set -euo pipefail
+
+SOCKET_PATH="${CMUX_CONTEXT_SOCKET_PATH:-$HOME/.config/cmux/context.sock}"
+MAX_SIZE="${CMUX_CONTEXT_MAX_INJECT_SIZE:-4096}"
+PROJECT_ROOT="${CMUX_PROJECT_ROOT:-$PWD}"
+ME_FILE="$PROJECT_ROOT/.cmux_team/me.json"
+
+# Check if daemon is running
+if [ ! -S "$SOCKET_PATH" ]; then
+    exit 0
+fi
+
+# Read current user identity if present
+ME_JSON=""
+if [ -f "$ME_FILE" ]; then
+    ME_JSON=$(cat "$ME_FILE" 2>/dev/null || echo "")
+fi
+
+# Helper: send RPC and extract result
+rpc_call() {
+    local method="$1"
+    local params="$2"
+    echo "{\"id\":1,\"method\":\"$method\",\"params\":$params}" | \
+        nc -U "$SOCKET_PATH" 2>/dev/null | \
+        python3 -c "
+import sys, json
+try:
+    resp = json.loads(sys.stdin.read())
+    if resp.get('ok'):
+        json.dump(resp.get('result', {}), sys.stdout)
+except:
+    pass
+" 2>/dev/null
+}
+
+output=""
+
+# Identity header
+if [ -n "$ME_JSON" ]; then
+    output+=$(echo "$ME_JSON" | python3 -c "
+import sys, json
+try:
+    me = json.loads(sys.stdin.read())
+    print(f'## Your Identity\n\nYou are acting on behalf of **{me.get(\"name\", \"unknown\")}** (role: {me.get(\"role\", \"none\")}). All context changes you make MUST be attributed to this user. Pass --author={me.get(\"user_id\", \"\")} or set user_id when calling cmux context commands.\n')
+except Exception:
+    pass
+" 2>/dev/null)
+    output+="\n"
+fi
+
+# Team roster
+user_data=$(rpc_call "context.user.list" '{}')
+if [ -n "$user_data" ]; then
+    users_count=$(echo "$user_data" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(len(d.get('users',[])))" 2>/dev/null || echo "0")
+    if [ "$users_count" -gt 0 ]; then
+        output+="## Team Members\n\n"
+        output+=$(echo "$user_data" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+for u in d.get('users', []):
+    role = f' — {u[\"role\"]}' if u.get('role') else ''
+    print(f'- **{u[\"name\"]}**{role} (id: {u[\"id\"][:8]})')
+" 2>/dev/null)
+        output+="\n\n"
+    fi
+fi
+
+# Active edit locks
+lock_data=$(rpc_call "context.lock.list" '{}')
+if [ -n "$lock_data" ]; then
+    lock_count=$(echo "$lock_data" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(len(d.get('locks',[])))" 2>/dev/null || echo "0")
+    if [ "$lock_count" -gt 0 ]; then
+        output+="## ⚠ Being Edited Right Now (don't touch)\n\n"
+        output+=$(echo "$lock_data" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+for l in d.get('locks', []):
+    print(f'- {l[\"kind\"]}:{l[\"target_id\"][:16]} — by {l[\"user_name\"]}')
+" 2>/dev/null)
+        output+="\n\n"
+    fi
+fi
+
+# KV entries
+kv_data=$(rpc_call "context.kv.list" '{}')
+if [ -n "$kv_data" ]; then
+    kv_count=$(echo "$kv_data" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(len(d.get('entries',[])))" 2>/dev/null || echo "0")
+    if [ "$kv_count" -gt 0 ]; then
+        output+="## Team Context: Key-Value Entries\n\n"
+        output+=$(echo "$kv_data" | python3 -c "
+import sys, json
+data = json.loads(sys.stdin.read())
+for e in data.get('entries', []):
+    cat = f' [{e[\"category\"]}]' if e.get('category') else ''
+    print(f'- **{e[\"key\"]}**{cat}: {e[\"value\"]}')
+" 2>/dev/null)
+        output+="\n\n"
+    fi
+fi
+
+# Documents (titles and categories only for summary)
+doc_data=$(rpc_call "context.doc.list" '{"limit":20}')
+if [ -n "$doc_data" ]; then
+    doc_count=$(echo "$doc_data" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(len(d.get('documents',[])))" 2>/dev/null || echo "0")
+    if [ "$doc_count" -gt 0 ]; then
+        output+="## Team Context: Documents\n\n"
+        output+="Use \`cmux context doc show <id>\` to read full documents.\n\n"
+        output+=$(echo "$doc_data" | python3 -c "
+import sys, json
+data = json.loads(sys.stdin.read())
+for d in data.get('documents', []):
+    cat = f' [{d[\"category\"]}]' if d.get('category') else ''
+    print(f'- {d[\"title\"]}{cat} (id: {d[\"id\"][:8]}...)')
+" 2>/dev/null)
+        output+="\n\n"
+    fi
+fi
+
+# Entities summary
+entity_data=$(rpc_call "context.entity.list" '{}')
+if [ -n "$entity_data" ]; then
+    entity_count=$(echo "$entity_data" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(len(d.get('entities',[])))" 2>/dev/null || echo "0")
+    if [ "$entity_count" -gt 0 ]; then
+        output+="## Team Context: Knowledge Graph\n\n"
+        output+=$(echo "$entity_data" | python3 -c "
+import sys, json
+data = json.loads(sys.stdin.read())
+types = {}
+for e in data.get('entities', []):
+    t = e.get('type', 'unknown')
+    types.setdefault(t, []).append(e['name'])
+for t, names in sorted(types.items()):
+    print(f'### {t.capitalize()}s')
+    for n in names:
+        print(f'- {n}')
+    print()
+" 2>/dev/null)
+        output+="\n"
+    fi
+fi
+
+# Truncate to max size
+if [ ${#output} -gt "$MAX_SIZE" ]; then
+    output="${output:0:$MAX_SIZE}"
+    output+="\n\n*[Context truncated. Use \`cmux context show\` for full data.]*\n"
+fi
+
+# Output
+if [ -n "$output" ]; then
+    echo -e "\n# Team Context (auto-injected by cmux)\n"
+    echo -e "$output"
+    echo -e "---\n*Use \`cmux context\` CLI to query and update team context.*\n"
+fi
