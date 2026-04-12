@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 func initSchema(db *sql.DB) error {
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
@@ -38,6 +38,11 @@ func initSchema(db *sql.DB) error {
 	if currentVersion < 2 {
 		if err := migrateV2(tx); err != nil {
 			return fmt.Errorf("migrate v2: %w", err)
+		}
+	}
+	if currentVersion < 3 {
+		if err := migrateV3(tx); err != nil {
+			return fmt.Errorf("migrate v3: %w", err)
 		}
 	}
 
@@ -158,6 +163,18 @@ func migrateV2(tx *sql.Tx) error {
 		`CREATE INDEX IF NOT EXISTS idx_events_user ON context_events(user_id)`,
 	}
 
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", stmt[:min(len(stmt), 60)], err)
+		}
+	}
+	return nil
+}
+
+func migrateV3(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE context_docs ADD COLUMN line_authors TEXT NOT NULL DEFAULT '[]'`,
+	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("exec %q: %w", stmt[:min(len(stmt), 60)], err)

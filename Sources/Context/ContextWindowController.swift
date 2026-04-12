@@ -481,12 +481,14 @@ struct ContextWindowView: View {
                     Text(doc.category).font(.system(size: 9)).padding(.horizontal, 4).padding(.vertical, 1)
                         .background(Color.secondary.opacity(0.1)).cornerRadius(3).foregroundColor(.secondary)
                 }
-                let who = authorLabel(doc.updatedBy ?? "", doc.createdBy)
-                if !who.isEmpty {
-                    Text(who).font(.system(size: 10))
-                        .padding(.horizontal, 6).padding(.vertical, 2)
-                        .background(Color.accentColor.opacity(0.15)).cornerRadius(4)
-                        .foregroundColor(.accentColor)
+                let uid = (doc.updatedBy?.isEmpty == false ? doc.updatedBy! : doc.createdBy)
+                if !uid.isEmpty {
+                    HStack(spacing: 4) {
+                        Circle().fill(colorForUser(uid)).frame(width: 8, height: 8)
+                        Text(userNameFor(uid)).font(.system(size: 10))
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(colorForUser(uid).opacity(0.15)).cornerRadius(4)
                 }
                 Spacer()
                 if editingDocId == doc.id {
@@ -528,8 +530,9 @@ struct ContextWindowView: View {
                 TextEditor(text: $editBody).font(.system(size: 12, design: .monospaced)).padding(4)
             } else {
                 ScrollView {
-                    Text(doc.body).font(.system(size: 12)).frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                    blamedBody(doc).padding(10).frame(maxWidth: .infinity, alignment: .leading)
                 }
+                blameLegend(doc).padding(.horizontal, 10).padding(.bottom, 8)
             }
         }
     }
@@ -1116,6 +1119,60 @@ struct ContextWindowView: View {
                 Spacer()
             }
             .padding(16)
+        }
+    }
+
+    /// Deterministic color for a user id. Palette picked for visible-but-subtle tints.
+    private func colorForUser(_ userId: String) -> Color {
+        guard !userId.isEmpty else { return .clear }
+        let palette: [Color] = [.blue, .green, .orange, .purple, .pink, .teal, .indigo, .brown, .cyan, .mint]
+        var hash: UInt64 = 5381
+        for byte in userId.utf8 { hash = (hash &* 33) &+ UInt64(byte) }
+        return palette[Int(hash % UInt64(palette.count))]
+    }
+
+    private func userNameFor(_ id: String) -> String {
+        if id.isEmpty { return "unknown" }
+        return store.users.first { $0.id == id }?.name ?? String(id.prefix(8))
+    }
+
+    @ViewBuilder
+    private func blamedBody(_ doc: ContextDocument) -> some View {
+        let lines = doc.body.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let authors = doc.lineAuthors ?? []
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
+                let who = idx < authors.count ? authors[idx] : (doc.createdBy)
+                let color = colorForUser(who)
+                HStack(alignment: .top, spacing: 6) {
+                    Rectangle().fill(color).frame(width: 3)
+                    Text(line.isEmpty ? " " : line)
+                        .font(.system(size: 12))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 1)
+                        .padding(.horizontal, 4)
+                        .background(color.opacity(0.08))
+                        .help("Edited by \(userNameFor(who))")
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func blameLegend(_ doc: ContextDocument) -> some View {
+        let authors = doc.lineAuthors ?? []
+        let uniq = Array(Set(authors + [doc.createdBy])).filter { !$0.isEmpty }
+        if !uniq.isEmpty {
+            HStack(spacing: 8) {
+                Text("Authors:").font(.system(size: 10)).foregroundColor(.secondary)
+                ForEach(uniq, id: \.self) { uid in
+                    HStack(spacing: 3) {
+                        Circle().fill(colorForUser(uid)).frame(width: 8, height: 8)
+                        Text(userNameFor(uid)).font(.system(size: 10))
+                    }
+                }
+                Spacer()
+            }
         }
     }
 

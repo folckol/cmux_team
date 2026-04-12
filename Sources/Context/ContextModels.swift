@@ -32,6 +32,7 @@ struct ContextDocument: Codable, Sendable, Equatable, Identifiable {
     let tags: [String]
     let createdBy: String
     let updatedBy: String?
+    let lineAuthors: [String]?
     let createdAt: Int64
     let updatedAt: Int64
 
@@ -39,6 +40,7 @@ struct ContextDocument: Codable, Sendable, Equatable, Identifiable {
         case id, title, body, category, tags
         case createdBy = "created_by"
         case updatedBy = "updated_by"
+        case lineAuthors = "line_authors"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
     }

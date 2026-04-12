@@ -250,20 +250,62 @@ func scanKVEntryFromRows(rows *sql.Rows) (*KVEntry, error) {
 // --- Documents ---
 
 type Document struct {
-	ID        string   `json:"id"`
-	Title     string   `json:"title"`
-	Body      string   `json:"body"`
-	Category  string   `json:"category"`
-	Tags      []string `json:"tags"`
-	CreatedBy string   `json:"created_by"`
-	UpdatedBy string   `json:"updated_by"`
-	CreatedAt int64    `json:"created_at"`
-	UpdatedAt int64    `json:"updated_at"`
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Body        string   `json:"body"`
+	Category    string   `json:"category"`
+	Tags        []string `json:"tags"`
+	CreatedBy   string   `json:"created_by"`
+	UpdatedBy   string   `json:"updated_by"`
+	LineAuthors []string `json:"line_authors"`
+	CreatedAt   int64    `json:"created_at"`
+	UpdatedAt   int64    `json:"updated_at"`
+}
+
+// reblameLines maps each line of newBody to an author. Unchanged lines keep
+// their prior author from oldAuthors; new/modified lines get 'updater'.
+// Uses a simple forward scan: for each new line, find matching old line starting
+// from last matched position.
+func reblameLines(oldBody, newBody string, oldAuthors []string, updater string) []string {
+	if newBody == "" {
+		return []string{}
+	}
+	newLines := splitLines(newBody)
+	if oldBody == "" || len(oldAuthors) == 0 {
+		result := make([]string, len(newLines))
+		for i := range result {
+			result[i] = updater
+		}
+		return result
+	}
+	oldLines := splitLines(oldBody)
+	result := make([]string, len(newLines))
+	cursor := 0
+	for i, line := range newLines {
+		found := -1
+		for j := cursor; j < len(oldLines); j++ {
+			if oldLines[j] == line {
+				found = j
+				break
+			}
+		}
+		if found >= 0 && found < len(oldAuthors) {
+			result[i] = oldAuthors[found]
+			cursor = found + 1
+		} else {
+			result[i] = updater
+		}
+	}
+	return result
+}
+
+func splitLines(s string) []string {
+	return strings.Split(s, "\n")
 }
 
 func (s *Store) DocGet(id string) (*Document, error) {
 	row := s.db.QueryRow(
-		`SELECT id, title, body, category, tags, created_by, updated_by, created_at, updated_at
+		`SELECT id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at
 		 FROM context_docs WHERE id = ?`, id)
 	return scanDocument(row)
 }
@@ -271,11 +313,13 @@ func (s *Store) DocGet(id string) (*Document, error) {
 func (s *Store) DocCreate(title, body, category string, tags []string, author string) (*Document, error) {
 	id := uuid.New().String()
 	tagsJSON, _ := json.Marshal(tags)
+	lineAuthors := reblameLines("", body, nil, author)
+	lineAuthorsJSON, _ := json.Marshal(lineAuthors)
 	now := time.Now().Unix()
 	_, err := s.db.Exec(
-		`INSERT INTO context_docs (id, title, body, category, tags, created_by, updated_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, title, body, category, string(tagsJSON), author, author, now, now)
+		`INSERT INTO context_docs (id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, title, body, category, string(tagsJSON), author, author, string(lineAuthorsJSON), now, now)
 	if err != nil {
 		return nil, fmt.Errorf("doc create: %w", err)
 	}
@@ -292,8 +336,18 @@ func (s *Store) DocUpdate(id string, title, body *string, tags []string, categor
 		args = append(args, *title)
 	}
 	if body != nil {
-		sets = append(sets, "body = ?")
-		args = append(args, *body)
+		// Recompute line authors
+		prev, _ := s.DocGet(id)
+		var prevBody string
+		var prevAuthors []string
+		if prev != nil {
+			prevBody = prev.Body
+			prevAuthors = prev.LineAuthors
+		}
+		newAuthors := reblameLines(prevBody, *body, prevAuthors, author)
+		newAuthorsJSON, _ := json.Marshal(newAuthors)
+		sets = append(sets, "body = ?", "line_authors = ?")
+		args = append(args, *body, string(newAuthorsJSON))
 	}
 	if category != nil {
 		sets = append(sets, "category = ?")
@@ -338,7 +392,7 @@ func (s *Store) DocDelete(id string) error {
 }
 
 func (s *Store) DocList(category, tag string, limit, offset int) ([]Document, error) {
-	query := `SELECT id, title, body, category, tags, created_by, updated_by, created_at, updated_at FROM context_docs WHERE 1=1`
+	query := `SELECT id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at FROM context_docs WHERE 1=1`
 	var args []any
 	if category != "" {
 		query += ` AND category = ?`
@@ -376,7 +430,7 @@ func (s *Store) DocList(category, tag string, limit, offset int) ([]Document, er
 
 func (s *Store) DocSearch(query string) ([]Document, error) {
 	rows, err := s.db.Query(
-		`SELECT d.id, d.title, d.body, d.category, d.tags, d.created_by, d.updated_by, d.created_at, d.updated_at
+		`SELECT d.id, d.title, d.body, d.category, d.tags, d.created_by, d.updated_by, d.line_authors, d.created_at, d.updated_at
 		 FROM context_docs d
 		 JOIN context_docs_fts fts ON d.rowid = fts.rowid
 		 WHERE context_docs_fts MATCH ?
@@ -400,8 +454,8 @@ func (s *Store) DocSearch(query string) ([]Document, error) {
 
 func scanDocument(row *sql.Row) (*Document, error) {
 	var d Document
-	var tagsJSON string
-	err := row.Scan(&d.ID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &d.CreatedAt, &d.UpdatedAt)
+	var tagsJSON, lineAuthorsJSON string
+	err := row.Scan(&d.ID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &lineAuthorsJSON, &d.CreatedAt, &d.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -412,19 +466,27 @@ func scanDocument(row *sql.Row) (*Document, error) {
 	if d.Tags == nil {
 		d.Tags = []string{}
 	}
+	_ = json.Unmarshal([]byte(lineAuthorsJSON), &d.LineAuthors)
+	if d.LineAuthors == nil {
+		d.LineAuthors = []string{}
+	}
 	return &d, nil
 }
 
 func scanDocumentFromRows(rows *sql.Rows) (*Document, error) {
 	var d Document
-	var tagsJSON string
-	err := rows.Scan(&d.ID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &d.CreatedAt, &d.UpdatedAt)
+	var tagsJSON, lineAuthorsJSON string
+	err := rows.Scan(&d.ID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &lineAuthorsJSON, &d.CreatedAt, &d.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("scan doc row: %w", err)
 	}
 	_ = json.Unmarshal([]byte(tagsJSON), &d.Tags)
 	if d.Tags == nil {
 		d.Tags = []string{}
+	}
+	_ = json.Unmarshal([]byte(lineAuthorsJSON), &d.LineAuthors)
+	if d.LineAuthors == nil {
+		d.LineAuthors = []string{}
 	}
 	return &d, nil
 }
