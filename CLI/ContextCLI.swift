@@ -495,6 +495,10 @@ enum ContextCLI {
     }
 
     private static func rpcCallRaw(socketPath: String, method: String, params: [String: Any]) -> Data? {
+        if let remote = resolveRemoteConfig() {
+            return rpcCallTCP(host: remote.host, port: remote.port, token: remote.token, method: method, params: params)
+        }
+
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
@@ -518,6 +522,10 @@ enum ContextCLI {
         }
         guard connectResult == 0 else { return nil }
 
+        return sendAndReceive(fd: fd, method: method, params: params)
+    }
+
+    private static func sendAndReceive(fd: Int32, method: String, params: [String: Any]) -> Data? {
         let request: [String: Any] = ["id": 1, "method": method, "params": params]
         guard let requestData = try? JSONSerialization.data(withJSONObject: request) else { return nil }
         var line = requestData
@@ -536,8 +544,75 @@ enum ContextCLI {
             responseData.append(contentsOf: buf[0..<n])
             if buf[0..<n].contains(UInt8(ascii: "\n")) { break }
         }
-
         return responseData.isEmpty ? nil : responseData
+    }
+
+    private struct RemoteCfg { let host: String; let port: Int; let token: String }
+
+    /// Reads .cmux_team/connection.json in the current project. Returns nil if local or missing.
+    private static func resolveRemoteConfig() -> RemoteCfg? {
+        let cwd = ProcessInfo.processInfo.environment["CMUX_PROJECT_ROOT"]
+            ?? FileManager.default.currentDirectoryPath
+        let url = URL(fileURLWithPath: cwd)
+            .appendingPathComponent(".cmux_team")
+            .appendingPathComponent("connection.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              (json["mode"] as? String) == "remote",
+              let host = json["host"] as? String, !host.isEmpty,
+              let port = json["port"] as? Int,
+              let token = json["token"] as? String, !token.isEmpty
+        else { return nil }
+        return RemoteCfg(host: host, port: port, token: token)
+    }
+
+    private static func rpcCallTCP(host: String, port: Int, token: String, method: String, params: [String: Any]) -> Data? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(port).bigEndian
+        if inet_pton(AF_INET, host, &addr.sin_addr) != 1 {
+            // Try DNS resolve via getaddrinfo
+            var hints = addrinfo()
+            hints.ai_family = AF_INET
+            hints.ai_socktype = SOCK_STREAM
+            var res: UnsafeMutablePointer<addrinfo>?
+            guard getaddrinfo(host, String(port), &hints, &res) == 0, let first = res else { return nil }
+            defer { freeaddrinfo(first) }
+            if let sa = first.pointee.ai_addr {
+                sa.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { p in
+                    addr.sin_addr = p.pointee.sin_addr
+                }
+            }
+        }
+
+        let connectResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                connect(fd, sp, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard connectResult == 0 else { return nil }
+
+        // Authenticate
+        let authReq: [String: Any] = ["id": 0, "method": "auth", "params": ["token": token]]
+        guard let authData = try? JSONSerialization.data(withJSONObject: authReq) else { return nil }
+        var authLine = authData
+        authLine.append(UInt8(ascii: "\n"))
+        let authSent = authLine.withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
+        guard authSent == authLine.count else { return nil }
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = recv(fd, &buf, buf.count, 0)
+        guard n > 0 else { return nil }
+        if let resp = try? JSONSerialization.jsonObject(with: Data(buf[0..<n])) as? [String: Any],
+           resp["ok"] as? Bool != true {
+            fputs("auth failed\n", stderr)
+            return nil
+        }
+
+        return sendAndReceive(fd: fd, method: method, params: params)
     }
 
     // MARK: - Helpers
