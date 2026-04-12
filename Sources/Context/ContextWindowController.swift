@@ -377,7 +377,14 @@ struct ContextWindowView: View {
             List(docs, selection: $selectedDocId) { doc in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(doc.title).font(.system(size: 12, weight: .medium))
-                    Text(relativeDate(doc.updatedAt)).font(.system(size: 9)).foregroundColor(.secondary)
+                    HStack(spacing: 4) {
+                        Text(relativeDate(doc.updatedAt)).font(.system(size: 9)).foregroundColor(.secondary)
+                        let who = authorLabel(doc.updatedBy ?? "", doc.createdBy)
+                        if !who.isEmpty {
+                            Text("·").font(.system(size: 9)).foregroundColor(.secondary.opacity(0.5))
+                            Text(who).font(.system(size: 9)).foregroundColor(.accentColor.opacity(0.8))
+                        }
+                    }
                 }
                 .tag(doc.id)
                 .contextMenu { Button("Delete") { store.deleteDoc(id: doc.id) } }
@@ -473,6 +480,13 @@ struct ContextWindowView: View {
                 if !doc.category.isEmpty {
                     Text(doc.category).font(.system(size: 9)).padding(.horizontal, 4).padding(.vertical, 1)
                         .background(Color.secondary.opacity(0.1)).cornerRadius(3).foregroundColor(.secondary)
+                }
+                let who = authorLabel(doc.updatedBy ?? "", doc.createdBy)
+                if !who.isEmpty {
+                    Text(who).font(.system(size: 10))
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.15)).cornerRadius(4)
+                        .foregroundColor(.accentColor)
                 }
                 Spacer()
                 if editingDocId == doc.id {
