@@ -9,6 +9,7 @@ SOCKET_PATH="${CMUX_CONTEXT_SOCKET_PATH:-$HOME/.config/cmux/context.sock}"
 MAX_SIZE="${CMUX_CONTEXT_MAX_INJECT_SIZE:-4096}"
 PROJECT_ROOT="${CMUX_PROJECT_ROOT:-$PWD}"
 ME_FILE="$PROJECT_ROOT/.cmux_team/me.json"
+PROMPT_FILE="$PROJECT_ROOT/.cmux_team/system_prompt.md"
 
 # Check if daemon is running
 if [ ! -S "$SOCKET_PATH" ]; then
@@ -39,6 +40,15 @@ except:
 }
 
 output=""
+
+# Project-specific system prompt (edited in Team Context → Settings)
+if [ -f "$PROMPT_FILE" ]; then
+    prompt_body=$(cat "$PROMPT_FILE" 2>/dev/null)
+    if [ -n "$prompt_body" ]; then
+        output+="$prompt_body"
+        output+="\n\n---\n\n"
+    fi
+fi
 
 # Identity header
 if [ -n "$ME_JSON" ]; then

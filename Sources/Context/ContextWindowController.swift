@@ -968,6 +968,9 @@ struct ContextWindowView: View {
     @State private var remoteToken = ""
     @State private var connectionStatus = ""
     @State private var didLoadProjectConfig = false
+    @State private var systemPromptText = ""
+    @State private var systemPromptDirty = false
+    @State private var systemPromptSaved = false
 
     private func loadFieldsFromProject() {
         guard !didLoadProjectConfig else { return }
@@ -983,6 +986,28 @@ struct ContextWindowView: View {
             remotePort = "9876"
             remoteToken = ""
         }
+        if let root = projectRoot {
+            systemPromptText = ContextStore.loadSystemPrompt(projectRoot: root)
+        } else {
+            systemPromptText = ContextStore.defaultSystemPrompt
+        }
+        systemPromptDirty = false
+    }
+
+    private func saveSystemPrompt() {
+        guard let root = projectRoot else { return }
+        do {
+            try ContextStore.saveSystemPrompt(projectRoot: root, text: systemPromptText)
+            systemPromptDirty = false
+            systemPromptSaved = true
+        } catch {
+            store.lastError = "Save prompt failed: \(error.localizedDescription)"
+        }
+    }
+
+    private func resetSystemPrompt() {
+        systemPromptText = ContextStore.defaultSystemPrompt
+        systemPromptDirty = true
     }
 
     private func saveProjectConfigIfPossible(mode: String, host: String, port: Int, token: String) {
@@ -1113,6 +1138,53 @@ struct ContextWindowView: View {
                         Button("Export JSON") {
                             // TODO: save dialog
                         }.font(.system(size: 11))
+                    }
+                }
+
+                Divider()
+
+                // System prompt editor
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("SYSTEM PROMPT FOR AGENTS").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary).tracking(0.5)
+                        Spacer()
+                        if systemPromptDirty {
+                            Text("unsaved").font(.system(size: 9)).foregroundColor(.orange)
+                        } else if systemPromptSaved {
+                            Text("saved").font(.system(size: 9)).foregroundColor(.green)
+                        }
+                    }
+
+                    Text("This prompt is injected into every Claude session started in this project. Rules here tell the agent how to keep the team context in sync.")
+                        .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+
+                    TextEditor(text: $systemPromptText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(minHeight: 220)
+                        .padding(4)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.secondary.opacity(0.2), lineWidth: 1))
+                        .onChange(of: systemPromptText) { _, _ in
+                            systemPromptDirty = true
+                            systemPromptSaved = false
+                        }
+
+                    HStack {
+                        Button("Save") { saveSystemPrompt() }
+                            .font(.system(size: 11, weight: .medium))
+                            .disabled(!systemPromptDirty || projectRoot == nil)
+                            .keyboardShortcut("s", modifiers: .command)
+                        Button("Reset to default") { resetSystemPrompt() }
+                            .font(.system(size: 11)).buttonStyle(.plain).foregroundColor(.secondary)
+                        Spacer()
+                        if let root = projectRoot {
+                            Text("\(root)/.cmux_team/system_prompt.md")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.secondary.opacity(0.6))
+                                .textSelection(.enabled)
+                                .lineLimit(1).truncationMode(.head)
+                        } else {
+                            Text("No project directory — saving disabled").font(.system(size: 9)).foregroundColor(.orange)
+                        }
                     }
                 }
 

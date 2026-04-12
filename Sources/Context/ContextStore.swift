@@ -138,6 +138,49 @@ final class ContextStore: ObservableObject {
         }
     }
 
+    // MARK: - Project system prompt (.cmux_team/system_prompt.md)
+
+    static let defaultSystemPrompt = """
+    # Team Context Rules
+
+    После каждого изменения кода, если это затронуло блок связанный с должностью другого пользователя в команде, смотри есть ли соответствующая папка -> файл согласно модулю над которым ты работаешь и принимай решение, нужно ли создать / отредактировать данный блок чтобы член команды понимал что были произведены какие либо изменения в системе на нашей стороне и мог их интегрировать.
+
+    ## Как это делать
+
+    1. Определи, к чьей зоне ответственности относится изменённый код (роль: frontend / backend / devops / …). Список членов команды и их ролей — выше, в блоке Team Members.
+    2. Если изменение затрагивает контракт или публичный интерфейс (API endpoint, формат данных, config, env-переменная, схема БД, событие шины, зависимость на внешний сервис) — **обнови общий контекст**:
+       - `cmux context set <key> "<value>" -c <category>` — для коротких значений (URL, флаги, имена очередей).
+       - `cmux context doc create/update -t "<title>" -f <file> -c <category>` — для описаний API, ADR, инструкций.
+       - `cmux context entity create --type service --name <name>` и связи `depends_on` / `uses` — если появился новый компонент или зависимость.
+    3. Перед записью покажи preview того, что собираешься сохранить.
+    4. Атрибуция применится автоматически из `.cmux_team/me.json`.
+    5. Если не уверен, кого касается изменение — спроси пользователя, а не пропускай.
+
+    ## Чего делать НЕ нужно
+    - Никогда не клади в контекст секреты (токены, пароли, приватные ключи). Только ссылки на vault.
+    - Не дублируй то, что уже есть — сначала `cmux context search <query>`.
+    """
+
+    static func systemPromptURL(projectRoot: String) -> URL {
+        URL(fileURLWithPath: projectRoot)
+            .appendingPathComponent(".cmux_team", isDirectory: true)
+            .appendingPathComponent("system_prompt.md")
+    }
+
+    static func loadSystemPrompt(projectRoot: String) -> String {
+        let url = systemPromptURL(projectRoot: projectRoot)
+        if let data = try? Data(contentsOf: url), let s = String(data: data, encoding: .utf8), !s.isEmpty {
+            return s
+        }
+        return defaultSystemPrompt
+    }
+
+    static func saveSystemPrompt(projectRoot: String, text: String) throws {
+        let url = systemPromptURL(projectRoot: projectRoot)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try text.data(using: .utf8)?.write(to: url, options: .atomic)
+    }
+
     static func meURL(projectRoot: String) -> URL {
         URL(fileURLWithPath: projectRoot)
             .appendingPathComponent(".cmux_team", isDirectory: true)
