@@ -143,8 +143,16 @@ struct ContextWindowView: View {
         }
         .frame(minWidth: 400, minHeight: 300)
         .onAppear { store.refresh() }
-        .onReceive(Timer.publish(every: 10, on: .main, in: .common).autoconnect()) { _ in
+        .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
             store.refreshLocks()
+            store.refreshKV()
+            store.refreshDocs()
+            store.refreshEntities()
+            store.refreshEdges()
+            if selectedTab == .users {
+                store.refreshUsers()
+                store.refreshEvents()
+            }
         }
     }
 
