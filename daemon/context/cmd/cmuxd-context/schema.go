@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 // DefaultProjectID is the id assigned to data that existed before the
 // multi-project schema (v4). New clients that don't specify a project also
@@ -53,6 +53,11 @@ func initSchema(db *sql.DB) error {
 	if currentVersion < 4 {
 		if err := migrateV4(tx); err != nil {
 			return fmt.Errorf("migrate v4: %w", err)
+		}
+	}
+	if currentVersion < 5 {
+		if err := migrateV5(tx); err != nil {
+			return fmt.Errorf("migrate v5: %w", err)
 		}
 	}
 
@@ -245,6 +250,45 @@ func migrateV4(tx *sql.Tx) error {
 		`CREATE INDEX IF NOT EXISTS idx_kv_project_category ON context_kv(project_id, category)`,
 	}
 
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", stmt[:min(len(stmt), 60)], err)
+		}
+	}
+	return nil
+}
+
+// migrateV5 introduces user/project access control:
+//   - users gain an `is_admin` flag (server-wide super-user).
+//   - projects gain an optional password (sha256 + per-project salt).
+//   - new `context_project_members` table tracks who joined which project.
+// Existing data: pre-v5 projects have no password (NULL), so existing
+// sessions can keep using the default project until an admin sets one.
+// First user created after upgrade automatically becomes the bootstrap admin
+// (handled in main.go, not the migration).
+func migrateV5(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE context_users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0`,
+
+		`ALTER TABLE context_projects ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE context_projects ADD COLUMN password_salt TEXT NOT NULL DEFAULT ''`,
+
+		`CREATE TABLE IF NOT EXISTS context_project_members (
+			project_id TEXT NOT NULL,
+			user_id    TEXT NOT NULL,
+			role       TEXT NOT NULL DEFAULT '',
+			joined_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+			PRIMARY KEY (project_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_members_user    ON context_project_members(user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_members_project ON context_project_members(project_id)`,
+
+		// Backfill: every pre-existing user becomes a member of the default
+		// project so legacy clients keep working after the upgrade. New
+		// projects start empty and require an explicit join.
+		`INSERT OR IGNORE INTO context_project_members (project_id, user_id, role, joined_at)
+		 SELECT 'default', id, '', unixepoch() FROM context_users`,
+	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("exec %q: %w", stmt[:min(len(stmt), 60)], err)

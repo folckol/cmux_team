@@ -346,6 +346,18 @@ func (s *contextServer) dispatch(req rpcRequest) rpcResponse {
 	case "context.project.delete":
 		return s.handleProjectDelete(req)
 
+	// Access control: project membership + per-project password + admin flag.
+	case "context.project.set_password":
+		return s.handleProjectSetPassword(req)
+	case "context.project.join":
+		return s.handleProjectJoin(req)
+	case "context.project.leave":
+		return s.handleProjectLeave(req)
+	case "context.project.members":
+		return s.handleProjectMembers(req)
+	case "context.user.set_admin":
+		return s.handleUserSetAdmin(req)
+
 	default:
 		return errResponse(req.ID, "method_not_found", "unknown method: "+req.Method)
 	}
@@ -369,7 +381,8 @@ func (s *contextServer) handleUserCreate(req rpcRequest) rpcResponse {
 }
 
 func (s *contextServer) handleUserList(req rpcRequest) rpcResponse {
-	users, err := s.store.UserList()
+	caller := callerParam(req.Params)
+	users, err := s.store.VisibleUsers(caller)
 	if err != nil {
 		return errResponse(req.ID, "internal", err.Error())
 	}
@@ -405,14 +418,20 @@ func (s *contextServer) handleUserDelete(req rpcRequest) rpcResponse {
 // --- Projects handlers ---
 
 func (s *contextServer) handleProjectList(req rpcRequest) rpcResponse {
-	projects, err := s.store.ProjectList()
+	caller := callerParam(req.Params)
+	all, err := s.store.ProjectList()
 	if err != nil {
 		return errResponse(req.ID, "internal", err.Error())
 	}
-	if projects == nil {
-		projects = []Project{}
+	if all == nil {
+		all = []Project{}
 	}
-	return okResponse(req.ID, map[string]any{"projects": projects, "count": len(projects)})
+	// Show every project to the world: clients need to know what's available
+	// so they can prompt for the password and join. Membership is what gates
+	// data access, not visibility of the project name itself.
+	// Admins additionally always see everything.
+	_ = caller
+	return okResponse(req.ID, map[string]any{"projects": all, "count": len(all)})
 }
 
 func (s *contextServer) handleProjectCreate(req rpcRequest) rpcResponse {
@@ -447,6 +466,13 @@ func (s *contextServer) handleProjectRename(req rpcRequest) rpcResponse {
 func (s *contextServer) handleProjectDelete(req rpcRequest) rpcResponse {
 	id, _ := req.Params["id"].(string)
 	author := authorParam(req.Params)
+	caller := callerParam(req.Params)
+	// Only the project owner OR an admin may delete.
+	if proj, _ := s.store.ProjectGet(id); proj != nil {
+		if !s.store.IsAdmin(caller) && proj.CreatedBy != caller {
+			return errResponse(req.ID, "forbidden", "only the project owner or an admin can delete this project")
+		}
+	}
 	if err := s.store.ProjectDelete(id); err != nil {
 		return errResponse(req.ID, "not_found", err.Error())
 	}
@@ -454,10 +480,154 @@ func (s *contextServer) handleProjectDelete(req rpcRequest) rpcResponse {
 	return okResponse(req.ID, map[string]any{"deleted": true})
 }
 
+// --- Access-control handlers ---
+
+func (s *contextServer) handleProjectSetPassword(req rpcRequest) rpcResponse {
+	id, _ := req.Params["id"].(string)
+	password, _ := req.Params["password"].(string)
+	caller := callerParam(req.Params)
+	if id == "" {
+		return errResponse(req.ID, "invalid_params", "id is required")
+	}
+	proj, err := s.store.ProjectGet(id)
+	if err != nil || proj == nil {
+		return errResponse(req.ID, "not_found", "project not found")
+	}
+	// Only owner or admin may rotate the password.
+	if !s.store.IsAdmin(caller) && proj.CreatedBy != caller {
+		return errResponse(req.ID, "forbidden", "only the project owner or an admin can change the password")
+	}
+	if err := s.store.SetProjectPassword(id, password); err != nil {
+		return errResponse(req.ID, "internal", err.Error())
+	}
+	s.store.LogEvent(id, caller, "update", "project_password", id, "")
+	return okResponse(req.ID, map[string]any{"ok": true, "has_password": password != ""})
+}
+
+func (s *contextServer) handleProjectJoin(req rpcRequest) rpcResponse {
+	id, _ := req.Params["id"].(string)
+	password, _ := req.Params["password"].(string)
+	role, _ := req.Params["role"].(string)
+	caller := callerParam(req.Params)
+	if id == "" || caller == "" {
+		return errResponse(req.ID, "invalid_params", "id and caller_user_id are required")
+	}
+	if _, err := s.store.ProjectGet(id); err != nil {
+		return errResponse(req.ID, "not_found", "project not found")
+	}
+	// Admins skip password verification.
+	if !s.store.IsAdmin(caller) {
+		ok, err := s.store.VerifyProjectPassword(id, password)
+		if err != nil {
+			return errResponse(req.ID, "not_found", err.Error())
+		}
+		if !ok {
+			return errResponse(req.ID, "wrong_password", "incorrect project password")
+		}
+	}
+	if err := s.store.AddMember(id, caller, role); err != nil {
+		return errResponse(req.ID, "internal", err.Error())
+	}
+	s.store.LogEvent(id, caller, "join", "project", id, role)
+	return okResponse(req.ID, map[string]any{"joined": true})
+}
+
+func (s *contextServer) handleProjectLeave(req rpcRequest) rpcResponse {
+	id, _ := req.Params["id"].(string)
+	target, _ := req.Params["user_id"].(string)
+	caller := callerParam(req.Params)
+	if id == "" {
+		return errResponse(req.ID, "invalid_params", "id is required")
+	}
+	// Default to leaving as the caller; admins/owner may kick others.
+	if target == "" {
+		target = caller
+	}
+	if target != caller {
+		proj, _ := s.store.ProjectGet(id)
+		isOwner := proj != nil && proj.CreatedBy == caller
+		if !s.store.IsAdmin(caller) && !isOwner {
+			return errResponse(req.ID, "forbidden", "only owners/admins can remove other members")
+		}
+	}
+	if err := s.store.RemoveMember(id, target); err != nil {
+		return errResponse(req.ID, "internal", err.Error())
+	}
+	s.store.LogEvent(id, caller, "leave", "project", id, target)
+	return okResponse(req.ID, map[string]any{"left": true})
+}
+
+func (s *contextServer) handleProjectMembers(req rpcRequest) rpcResponse {
+	id, _ := req.Params["id"].(string)
+	if id == "" {
+		id = DefaultProjectID
+	}
+	caller := callerParam(req.Params)
+	// Visibility: admins see everything; others must be members of the
+	// project they're querying.
+	if err := s.requireMembership(id, caller); err != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: err}
+	}
+	members, mErr := s.store.MembersOf(id)
+	if mErr != nil {
+		return errResponse(req.ID, "internal", mErr.Error())
+	}
+	if members == nil {
+		members = []Member{}
+	}
+	return okResponse(req.ID, map[string]any{"members": members, "count": len(members)})
+}
+
+func (s *contextServer) handleUserSetAdmin(req rpcRequest) rpcResponse {
+	target, _ := req.Params["id"].(string)
+	caller := callerParam(req.Params)
+	isAdminAny := req.Params["is_admin"]
+	flag := false
+	switch v := isAdminAny.(type) {
+	case bool:
+		flag = v
+	case float64:
+		flag = v != 0
+	}
+	if target == "" {
+		return errResponse(req.ID, "invalid_params", "id is required")
+	}
+	// Only an existing admin can grant/revoke admin.
+	if !s.store.IsAdmin(caller) {
+		return errResponse(req.ID, "forbidden", "only admins can change admin role")
+	}
+	// Refuse to demote the last admin so the server never becomes orphaned.
+	if !flag {
+		users, _ := s.store.UserList()
+		admins := 0
+		for _, u := range users {
+			if u.IsAdmin {
+				admins++
+			}
+		}
+		if admins <= 1 {
+			return errResponse(req.ID, "forbidden", "cannot demote the only remaining admin")
+		}
+	}
+	if err := s.store.SetUserAdmin(target, flag); err != nil {
+		return errResponse(req.ID, "not_found", err.Error())
+	}
+	action := "promote"
+	if !flag {
+		action = "demote"
+	}
+	s.store.LogEvent(DefaultProjectID, caller, action, "user_admin", target, "")
+	updated, _ := s.store.UserGet(target)
+	return okResponse(req.ID, updated)
+}
+
 // --- Locks handlers ---
 
 func (s *contextServer) handleLockAcquire(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	kind, _ := req.Params["kind"].(string)
 	id, _ := req.Params["target_id"].(string)
 	userID, _ := req.Params["user_id"].(string)
@@ -474,6 +644,9 @@ func (s *contextServer) handleLockAcquire(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleLockHeartbeat(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	kind, _ := req.Params["kind"].(string)
 	id, _ := req.Params["target_id"].(string)
 	userID, _ := req.Params["user_id"].(string)
@@ -483,6 +656,9 @@ func (s *contextServer) handleLockHeartbeat(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleLockRelease(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	kind, _ := req.Params["kind"].(string)
 	id, _ := req.Params["target_id"].(string)
 	userID, _ := req.Params["user_id"].(string)
@@ -504,6 +680,9 @@ func (s *contextServer) handleLockList(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEventList(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	limit := intParam(req.Params, "limit", 50)
 	userID, _ := req.Params["user_id"].(string)
 	events, err := s.store.EventList(project, limit, userID)
@@ -520,6 +699,9 @@ func (s *contextServer) handleEventList(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleKVGet(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	key, _ := req.Params["key"].(string)
 	if key == "" {
 		return errResponse(req.ID, "invalid_params", "key is required")
@@ -536,6 +718,9 @@ func (s *contextServer) handleKVGet(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleKVSet(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	key, _ := req.Params["key"].(string)
 	value, _ := req.Params["value"].(string)
 	category, _ := req.Params["category"].(string)
@@ -557,6 +742,9 @@ func (s *contextServer) handleKVSet(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleKVDelete(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	key, _ := req.Params["key"].(string)
 	author := authorParam(req.Params)
 	if key == "" {
@@ -574,6 +762,9 @@ func (s *contextServer) handleKVDelete(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleKVList(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	category, _ := req.Params["category"].(string)
 	prefix, _ := req.Params["prefix"].(string)
 	entries, err := s.store.KVList(project, category, prefix)
@@ -590,6 +781,9 @@ func (s *contextServer) handleKVList(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleDocGet(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	id, _ := req.Params["id"].(string)
 	if id == "" {
 		return errResponse(req.ID, "invalid_params", "id is required")
@@ -606,6 +800,9 @@ func (s *contextServer) handleDocGet(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleDocCreate(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	title, _ := req.Params["title"].(string)
 	body, _ := req.Params["body"].(string)
 	category, _ := req.Params["category"].(string)
@@ -624,6 +821,9 @@ func (s *contextServer) handleDocCreate(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleDocUpdate(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	id, _ := req.Params["id"].(string)
 	author := authorParam(req.Params)
 	if id == "" {
@@ -656,6 +856,9 @@ func (s *contextServer) handleDocUpdate(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleDocDelete(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	id, _ := req.Params["id"].(string)
 	author := authorParam(req.Params)
 	if id == "" {
@@ -673,6 +876,9 @@ func (s *contextServer) handleDocDelete(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleDocList(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	category, _ := req.Params["category"].(string)
 	tag, _ := req.Params["tag"].(string)
 	limit := intParam(req.Params, "limit", 50)
@@ -689,6 +895,9 @@ func (s *contextServer) handleDocList(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleDocSearch(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	query, _ := req.Params["query"].(string)
 	if query == "" {
 		return errResponse(req.ID, "invalid_params", "query is required")
@@ -707,6 +916,9 @@ func (s *contextServer) handleDocSearch(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEntityCreate(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	entityType, _ := req.Params["type"].(string)
 	name, _ := req.Params["name"].(string)
 	properties, _ := req.Params["properties"].(map[string]any)
@@ -724,6 +936,9 @@ func (s *contextServer) handleEntityCreate(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEntityGet(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	id, _ := req.Params["id"].(string)
 	if id == "" {
 		return errResponse(req.ID, "invalid_params", "id is required")
@@ -740,6 +955,9 @@ func (s *contextServer) handleEntityGet(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEntityUpdate(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	id, _ := req.Params["id"].(string)
 	author := authorParam(req.Params)
 	if id == "" {
@@ -763,6 +981,9 @@ func (s *contextServer) handleEntityUpdate(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEntityDelete(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	id, _ := req.Params["id"].(string)
 	author := authorParam(req.Params)
 	if id == "" {
@@ -780,6 +1001,9 @@ func (s *contextServer) handleEntityDelete(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEntityList(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	entityType, _ := req.Params["type"].(string)
 	limit := intParam(req.Params, "limit", 100)
 	entities, err := s.store.EntityList(project, entityType, limit)
@@ -796,6 +1020,9 @@ func (s *contextServer) handleEntityList(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEdgeCreate(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	sourceID, _ := req.Params["source_id"].(string)
 	targetID, _ := req.Params["target_id"].(string)
 	relation, _ := req.Params["relation"].(string)
@@ -814,6 +1041,9 @@ func (s *contextServer) handleEdgeCreate(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEdgeDelete(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	id, _ := req.Params["id"].(string)
 	author := authorParam(req.Params)
 	if id == "" {
@@ -828,6 +1058,9 @@ func (s *contextServer) handleEdgeDelete(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleEdgeList(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	entityID, _ := req.Params["entity_id"].(string)
 	relation, _ := req.Params["relation"].(string)
 	direction, _ := req.Params["direction"].(string)
@@ -845,6 +1078,9 @@ func (s *contextServer) handleEdgeList(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleSearch(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	query, _ := req.Params["query"].(string)
 	if query == "" {
 		return errResponse(req.ID, "invalid_params", "query is required")
@@ -861,6 +1097,9 @@ func (s *contextServer) handleSearch(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleExport(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	data, err := s.store.Export(project)
 	if err != nil {
 		return errResponse(req.ID, "internal", err.Error())
@@ -870,6 +1109,9 @@ func (s *contextServer) handleExport(req rpcRequest) rpcResponse {
 
 func (s *contextServer) handleImport(req rpcRequest) rpcResponse {
 	project := projectParam(req.Params)
+	if e := s.requireMembership(project, callerParam(req.Params)); e != nil {
+		return rpcResponse{ID: req.ID, OK: false, Error: e}
+	}
 	data, _ := req.Params["data"].(map[string]any)
 	if data == nil {
 		return errResponse(req.ID, "invalid_params", "data object is required")
@@ -921,6 +1163,41 @@ func projectParam(params map[string]any) string {
 		return v
 	}
 	return DefaultProjectID
+}
+
+// callerParam extracts the caller's user id (for authorization checks).
+// Falls back to author/created_by for backward compatibility — the daemon
+// trusts whatever the client sends because we have no per-user auth yet.
+// Documented in the security caveat in MEMORY.md.
+func callerParam(params map[string]any) string {
+	if v, ok := params["caller_user_id"].(string); ok && v != "" {
+		return v
+	}
+	return authorParam(params)
+}
+
+// requireMembership returns nil if the caller may operate on the given
+// project (member OR admin OR daemon-default-with-empty-caller for back-compat).
+// Otherwise returns a populated rpcError suitable for direct return.
+//
+// Bootstrap convenience: when no users exist at all, every call is
+// permitted — the very first user can identify themselves and join.
+func (s *contextServer) requireMembership(projectID, callerID string) *rpcError {
+	if n, _ := s.store.CountUsers(); n == 0 {
+		return nil
+	}
+	if callerID == "" {
+		return &rpcError{Code: "identity_required",
+			Message: "identify yourself (Team Context → Users → Identify as) before using shared context"}
+	}
+	if s.store.IsAdmin(callerID) {
+		return nil
+	}
+	if s.store.IsMember(projectID, callerID) {
+		return nil
+	}
+	return &rpcError{Code: "not_a_member",
+		Message: "you are not a member of project '" + projectID + "' — use project.join with the project password"}
 }
 
 // authorParam extracts the author user id from RPC params.

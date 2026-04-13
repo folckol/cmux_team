@@ -77,6 +77,12 @@ struct ContextWindowView: View {
     @State private var newEntityType = "service"
     @State private var showingNewProjectSheet = false
     @State private var newProjectName = ""
+    @State private var newProjectPassword = ""
+    @State private var joinPromptProject: ContextProject?
+    @State private var joinPasswordInput = ""
+    @State private var joinError = ""
+    @State private var passwordSheetProject: ContextProject?
+    @State private var passwordSheetInput = ""
 
     private let entityTypes = ["role", "person", "service", "task", "decision", "dependency"]
 
@@ -88,6 +94,86 @@ struct ContextWindowView: View {
     /// "default" when nothing is explicitly selected — matches daemon fallback.
     private var effectiveProjectId: String {
         store.currentProjectId.isEmpty ? "default" : store.currentProjectId
+    }
+
+    private var isMemberOfCurrentProject: Bool {
+        guard let me = store.currentUser else { return false }
+        if me.isAdmin { return true }
+        return store.currentProjectMembers.contains(where: { $0.userId == me.id })
+    }
+
+    private var isGated: Bool {
+        store.isUnidentified || store.notAMemberOfCurrentProject
+    }
+
+    /// Full-panel banner shown when shared context is not accessible yet.
+    /// Must be rendered only when `isGated` is true.
+    @ViewBuilder
+    private func gateBanner() -> some View {
+        if store.isUnidentified {
+            VStack(spacing: 12) {
+                Image(systemName: "person.crop.circle.badge.questionmark")
+                    .font(.system(size: 36)).foregroundColor(.secondary)
+                Text("Identify yourself first").font(.system(size: 14, weight: .semibold))
+                Text("Open the Users tab → Identify as, set your name and role. Shared context is disabled until you do.")
+                    .multilineTextAlignment(.center).font(.system(size: 11)).foregroundColor(.secondary)
+                    .frame(maxWidth: 320)
+                Button("Go to Users") { selectedTab = .users }
+                    .buttonStyle(.borderedProminent)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+        } else if store.notAMemberOfCurrentProject {
+            let proj = store.projects.first(where: { $0.id == effectiveProjectId })
+            VStack(spacing: 12) {
+                Image(systemName: "lock").font(.system(size: 36)).foregroundColor(.secondary)
+                Text("You haven't joined this project").font(.system(size: 14, weight: .semibold))
+                Text("“\(proj?.name ?? effectiveProjectId)” is private. Ask the owner for the password, or pick a different project from the header picker.")
+                    .multilineTextAlignment(.center).font(.system(size: 11)).foregroundColor(.secondary)
+                    .frame(maxWidth: 360)
+                if let proj {
+                    Button("Enter password…") {
+                        joinPromptProject = proj
+                        joinPasswordInput = ""
+                        joinError = ""
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .padding(24)
+        }
+    }
+
+    /// Decide whether we can switch in-place or must prompt for the project
+    /// password. Admins and already-joined users go through directly.
+    private func attemptSwitchProject(_ project: ContextProject) {
+        // No identity yet → user can't use context at all, no point in switching.
+        if store.isUnidentified {
+            store.switchProject(id: project.id)
+            return
+        }
+        if store.isCurrentUserAdmin {
+            store.switchProject(id: project.id)
+            return
+        }
+        // Check membership against daemon data we already have cached.
+        let iAmMember = project.id == effectiveProjectId
+            ? isMemberOfCurrentProject
+            : false
+        if iAmMember {
+            store.switchProject(id: project.id)
+            return
+        }
+        // If the project has no password, join is free.
+        if !project.hasPassword {
+            store.joinProject(id: project.id, password: "")
+            return
+        }
+        // Gate with password sheet.
+        joinPromptProject = project
+        joinPasswordInput = ""
+        joinError = ""
     }
 
     private var docsInSelectedCategory: [ContextDocument] {
@@ -119,9 +205,10 @@ struct ContextWindowView: View {
                 // Project selector
                 Menu {
                     ForEach(store.projects) { p in
-                        Button(action: { store.switchProject(id: p.id) }) {
+                        Button(action: { attemptSwitchProject(p) }) {
                             HStack {
                                 Text(p.name)
+                                if p.hasPassword { Image(systemName: "lock") }
                                 if p.id == effectiveProjectId { Image(systemName: "checkmark") }
                             }
                         }
@@ -129,6 +216,7 @@ struct ContextWindowView: View {
                     if !store.projects.isEmpty { Divider() }
                     Button(action: {
                         newProjectName = ""
+                        newProjectPassword = ""
                         showingNewProjectSheet = true
                     }) {
                         Label("New project…", systemImage: "plus")
@@ -170,12 +258,16 @@ struct ContextWindowView: View {
             Divider()
 
             // Content
-            switch selectedTab {
-            case .keyValue: kvView
-            case .documents: docsView
-            case .graph: graphView
-            case .users: usersView
-            case .settings: settingsView
+            if isGated && selectedTab != .settings && selectedTab != .users {
+                gateBanner()
+            } else {
+                switch selectedTab {
+                case .keyValue: kvView
+                case .documents: docsView
+                case .graph: graphView
+                case .users: usersView
+                case .settings: settingsView
+                }
             }
         }
         .frame(minWidth: 400, minHeight: 300)
@@ -184,7 +276,13 @@ struct ContextWindowView: View {
                 Text("New project").font(.headline)
                 TextField("Project name", text: $newProjectName)
                     .textFieldStyle(.roundedBorder)
-                    .frame(width: 260)
+                    .frame(width: 300)
+                SecureField("Project password (required to join)", text: $newProjectPassword)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 300)
+                Text("Teammates will need this password the first time they pick this project. You can leave it empty to create an open project and set a password later from Settings.")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+                    .frame(width: 300, alignment: .leading)
                 HStack {
                     Spacer()
                     Button("Cancel") { showingNewProjectSheet = false }
@@ -192,11 +290,76 @@ struct ContextWindowView: View {
                     Button("Create") {
                         let name = newProjectName.trimmingCharacters(in: .whitespaces)
                         guard !name.isEmpty else { return }
-                        store.createProject(name: name)
+                        let pwd = newProjectPassword
+                        store.createProject(name: name) { result in
+                            if case .success(let p) = result, !pwd.isEmpty {
+                                store.setProjectPassword(id: p.id, password: pwd)
+                            }
+                        }
                         showingNewProjectSheet = false
                     }
                     .keyboardShortcut(.defaultAction)
                     .disabled(newProjectName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(16)
+        }
+        .sheet(item: $joinPromptProject) { project in
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Join “\(project.name)”").font(.headline)
+                Text("This project is password-protected. Enter the password from the project owner to access its shared context.")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                    .frame(width: 320, alignment: .leading)
+                SecureField("Password", text: $joinPasswordInput)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 320)
+                if !joinError.isEmpty {
+                    Text(joinError).font(.system(size: 11)).foregroundColor(.red)
+                }
+                HStack {
+                    Spacer()
+                    Button("Cancel") { joinPromptProject = nil }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Join") {
+                        joinError = ""
+                        let pwd = joinPasswordInput
+                        store.joinProject(id: project.id, password: pwd) { result in
+                            switch result {
+                            case .success:
+                                joinPromptProject = nil
+                            case .failure(let err):
+                                if case .serverError(let code, let msg) = err {
+                                    joinError = code == "wrong_password" ? "Incorrect password" : msg
+                                } else {
+                                    joinError = err.localizedDescription
+                                }
+                            }
+                        }
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(joinPasswordInput.isEmpty)
+                }
+            }
+            .padding(16)
+        }
+        .sheet(item: $passwordSheetProject) { project in
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Set password for “\(project.name)”").font(.headline)
+                Text("Any user who picks this project for the first time will need this password. Leave empty to remove the password (open project).")
+                    .font(.system(size: 11)).foregroundColor(.secondary)
+                    .frame(width: 320, alignment: .leading)
+                SecureField("New password (empty = remove)", text: $passwordSheetInput)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 320)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { passwordSheetProject = nil }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Save") {
+                        store.setProjectPassword(id: project.id, password: passwordSheetInput)
+                        passwordSheetProject = nil
+                    }
+                    .keyboardShortcut(.defaultAction)
                 }
             }
             .padding(16)
@@ -952,9 +1115,19 @@ struct ContextWindowView: View {
                     } else {
                         ForEach(store.users) { u in
                             HStack {
-                                Image(systemName: "person.fill").foregroundColor(.secondary).font(.system(size: 11))
+                                Image(systemName: u.isAdmin ? "star.fill" : "person.fill")
+                                    .foregroundColor(u.isAdmin ? .yellow : .secondary)
+                                    .font(.system(size: 11))
                                 VStack(alignment: .leading, spacing: 1) {
-                                    Text(u.name).font(.system(size: 12))
+                                    HStack(spacing: 6) {
+                                        Text(u.name).font(.system(size: 12))
+                                        if u.isAdmin {
+                                            Text("ADMIN").font(.system(size: 8, weight: .bold))
+                                                .foregroundColor(.yellow)
+                                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                                .background(Color.yellow.opacity(0.15)).cornerRadius(3)
+                                        }
+                                    }
                                     if !u.role.isEmpty {
                                         Text(u.role).font(.system(size: 10)).foregroundColor(.secondary)
                                     }
@@ -963,6 +1136,15 @@ struct ContextWindowView: View {
                                 if u.id == store.currentUser?.id {
                                     Text("you").font(.system(size: 9)).foregroundColor(.green)
                                         .padding(.horizontal, 5).padding(.vertical, 1).background(Color.green.opacity(0.15)).cornerRadius(3)
+                                }
+                                // Admin-only controls.
+                                if store.isCurrentUserAdmin && u.id != store.currentUser?.id {
+                                    Button(u.isAdmin ? "Revoke admin" : "Make admin") {
+                                        store.setUserAdmin(id: u.id, isAdmin: !u.isAdmin)
+                                    }
+                                    .font(.system(size: 10))
+                                    .buttonStyle(.plain)
+                                    .foregroundColor(.accentColor)
                                 }
                             }
                             .padding(.vertical, 4)
@@ -1236,6 +1418,19 @@ struct ContextWindowView: View {
                                     .foregroundColor(.secondary.opacity(0.6))
 
                                 Spacer()
+
+                                // Set/change/remove password: owner or admin only.
+                                let canManage = store.isCurrentUserAdmin
+                                    || (store.currentUser?.id == p.createdBy)
+                                if canManage {
+                                    Button(action: {
+                                        passwordSheetProject = p
+                                        passwordSheetInput = ""
+                                    }) {
+                                        Image(systemName: p.hasPassword ? "lock.fill" : "lock.open").font(.system(size: 10))
+                                    }.buttonStyle(.plain).foregroundColor(p.hasPassword ? .yellow : .secondary)
+                                        .help(p.hasPassword ? "Change/remove password" : "Set password")
+                                }
 
                                 if p.id != "default" {
                                     Button(action: {

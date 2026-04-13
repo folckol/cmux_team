@@ -139,6 +139,8 @@ enum ContextCLI {
             return handleImport(args: Array(args.dropFirst()), socketPath: socketPath)
         case "project", "projects":
             return handleProject(args: Array(args.dropFirst()), socketPath: socketPath)
+        case "user":
+            return handleUser(args: Array(args.dropFirst()), socketPath: socketPath)
         case "help", "--help", "-h":
             printUsage()
             return 0
@@ -694,6 +696,36 @@ enum ContextCLI {
         return out
     }
 
+    // MARK: - User subcommand (admin management)
+
+    private static func handleUser(args: [String], socketPath: String) -> Int32 {
+        guard let sub = args.first else {
+            fputs("Usage: cmux context user admin <id> [--on|--off]\n", stderr)
+            return 2
+        }
+        switch sub {
+        case "admin":
+            guard args.count >= 2 else {
+                fputs("Usage: cmux context user admin <id> [--on|--off]\n", stderr)
+                return 2
+            }
+            let id = args[1]
+            // Default to --on if neither flag given.
+            let tail = Array(args.dropFirst(2))
+            let off = tail.contains("--off")
+            let on = tail.contains("--on") || !off
+            guard rpcCall(socketPath: socketPath, method: "context.user.set_admin",
+                          params: ["id": id, "is_admin": on]) != nil else {
+                return 1
+            }
+            print("User \(id) is now \(on ? "ADMIN" : "not admin")")
+            return 0
+        default:
+            fputs("Unknown user subcommand: \(sub)\nUsage: cmux context user admin <id> [--on|--off]\n", stderr)
+            return 2
+        }
+    }
+
     // MARK: - Project subcommand
 
     private static func handleProject(args: [String], socketPath: String) -> Int32 {
@@ -769,6 +801,67 @@ enum ContextCLI {
                 return 1
             }
             print("Deleted project \(id)")
+            return 0
+
+        case "password", "passwd":
+            guard args.count >= 2 else {
+                fputs("Usage: cmux context project password <id> [--password <pwd>]\n  (empty password removes protection)\n", stderr)
+                return 2
+            }
+            let id = args[1]
+            let pwd = extractFlag(args: Array(args.dropFirst(2)), flag: "--password") ?? ""
+            guard rpcCall(socketPath: socketPath, method: "context.project.set_password",
+                          params: ["id": id, "password": pwd]) != nil else {
+                return 1
+            }
+            print(pwd.isEmpty ? "Password cleared for \(id)" : "Password set for \(id)")
+            return 0
+
+        case "join":
+            guard args.count >= 2 else {
+                fputs("Usage: cmux context project join <id> [--password <pwd>] [--role <role>]\n", stderr)
+                return 2
+            }
+            let id = args[1]
+            let pwd = extractFlag(args: Array(args.dropFirst(2)), flag: "--password") ?? ""
+            let role = extractFlag(args: Array(args.dropFirst(2)), flag: "--role") ?? ""
+            guard rpcCall(socketPath: socketPath, method: "context.project.join",
+                          params: ["id": id, "password": pwd, "role": role]) != nil else {
+                return 1
+            }
+            if !saveProjectIdToConfig(id) {
+                fputs("Joined, but could not persist project id to .cmux_team/connection.json\n", stderr)
+            }
+            print("Joined \(id)")
+            return 0
+
+        case "leave":
+            guard args.count >= 2 else {
+                fputs("Usage: cmux context project leave <id> [--user <user-id>]\n", stderr)
+                return 2
+            }
+            let id = args[1]
+            let target = extractFlag(args: Array(args.dropFirst(2)), flag: "--user") ?? ""
+            guard rpcCall(socketPath: socketPath, method: "context.project.leave",
+                          params: ["id": id, "user_id": target]) != nil else {
+                return 1
+            }
+            print("Left \(id)")
+            return 0
+
+        case "members":
+            let id = args.count >= 2 ? args[1] : ""
+            guard let resp = rpcCall(socketPath: socketPath, method: "context.project.members",
+                                     params: ["id": id]),
+                  let list = resp["members"] as? [[String: Any]] else {
+                return 1
+            }
+            if list.isEmpty { print("No members"); return 0 }
+            for m in list {
+                let uid = m["user_id"] as? String ?? ""
+                let role = m["role"] as? String ?? ""
+                print("\(uid.padding(toLength: 36, withPad: " ", startingAt: 0))  \(role)")
+            }
             return 0
 
         default:
@@ -897,6 +990,12 @@ enum ContextCLI {
           project use <id>                  Select active project (writes to .cmux_team/connection.json)
           project rename <id> <name>        Rename a project
           project delete <id>               Delete a project and all its data
+          project password <id> [--password <p>]   Set (or clear) project password (owner/admin)
+          project join <id> [--password <p>] [--role <r>]  Join project; records membership
+          project leave <id> [--user <uid>] Leave project (or remove another as owner/admin)
+          project members [<id>]            List members of a project
+
+          user admin <id> [--on|--off]      Grant/revoke server-wide admin role (admin-only)
 
         Global flags:
           --project <id>                    Override active project for this invocation

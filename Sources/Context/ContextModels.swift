@@ -96,11 +96,45 @@ struct ContextProject: Codable, Sendable, Equatable, Identifiable {
     let name: String
     let createdBy: String?
     let createdAt: Int64
+    let hasPassword: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, name
         case createdBy = "created_by"
         case createdAt = "created_at"
+        case hasPassword = "has_password"
+    }
+
+    init(id: String, name: String, createdBy: String? = nil, createdAt: Int64 = 0, hasPassword: Bool = false) {
+        self.id = id; self.name = name; self.createdBy = createdBy
+        self.createdAt = createdAt; self.hasPassword = hasPassword
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.createdBy = try c.decodeIfPresent(String.self, forKey: .createdBy)
+        self.createdAt = try c.decodeIfPresent(Int64.self, forKey: .createdAt) ?? 0
+        // Older daemons (pre-v5) don't send has_password; default false.
+        self.hasPassword = try c.decodeIfPresent(Bool.self, forKey: .hasPassword) ?? false
+    }
+}
+
+// MARK: - Project membership
+
+struct ContextProjectMember: Codable, Sendable, Equatable, Identifiable {
+    var id: String { "\(projectId):\(userId)" }
+    let projectId: String
+    let userId: String
+    let role: String
+    let joinedAt: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case role
+        case projectId = "project_id"
+        case userId = "user_id"
+        case joinedAt = "joined_at"
     }
 }
 
@@ -111,11 +145,28 @@ struct ContextUser: Codable, Sendable, Equatable, Identifiable {
     let name: String
     let role: String
     let email: String
+    let isAdmin: Bool
     let createdAt: Int64
 
     enum CodingKeys: String, CodingKey {
         case id, name, role, email
+        case isAdmin = "is_admin"
         case createdAt = "created_at"
+    }
+
+    init(id: String, name: String, role: String, email: String, isAdmin: Bool = false, createdAt: Int64) {
+        self.id = id; self.name = name; self.role = role; self.email = email
+        self.isAdmin = isAdmin; self.createdAt = createdAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.name = try c.decode(String.self, forKey: .name)
+        self.role = try c.decodeIfPresent(String.self, forKey: .role) ?? ""
+        self.email = try c.decodeIfPresent(String.self, forKey: .email) ?? ""
+        self.isAdmin = try c.decodeIfPresent(Bool.self, forKey: .isAdmin) ?? false
+        self.createdAt = try c.decodeIfPresent(Int64.self, forKey: .createdAt) ?? 0
     }
 }
 

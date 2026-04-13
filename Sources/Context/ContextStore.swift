@@ -17,6 +17,12 @@ final class ContextStore: ObservableObject {
     @Published var locks: [ContextLock] = []
     @Published var projects: [ContextProject] = []
     @Published var currentProjectId: String = ""
+    @Published var currentProjectMembers: [ContextProjectMember] = []
+    /// True when the daemon refused the last operation due to membership.
+    /// UI uses this to flip into "Join this project" mode.
+    @Published var notAMemberOfCurrentProject: Bool = false
+    /// True when no user has identified themselves yet.
+    var isUnidentified: Bool { (currentUser?.id ?? "").isEmpty }
     @Published var currentUser: ContextUser?
     @Published var isConnected: Bool = false
     @Published var lastError: String?
@@ -139,6 +145,7 @@ final class ContextStore: ObservableObject {
     func refresh() {
         Task {
             await refreshProjects()
+            await refreshProjectMembers()
             await refreshKV()
             await refreshDocs()
             await refreshEntities()
@@ -308,9 +315,11 @@ final class ContextStore: ObservableObject {
     func setProjectRoot(_ root: String?) {
         self.projectRoot = root
         if let root, let me = ContextStore.loadMe(projectRoot: root) {
-            self.currentUser = ContextUser(id: me.userId, name: me.name, role: me.role, email: me.email, createdAt: 0)
+            self.currentUser = ContextUser(id: me.userId, name: me.name, role: me.role, email: me.email, isAdmin: false, createdAt: 0)
+            self.rpcClient.setCurrentUserId(me.userId)
         } else {
             self.currentUser = nil
+            self.rpcClient.setCurrentUserId("")
         }
     }
 
@@ -322,16 +331,115 @@ final class ContextStore: ObservableObject {
                 switch result {
                 case .success(let user):
                     self?.currentUser = user
+                    self?.rpcClient.setCurrentUserId(user.id)
                     if let root = self?.projectRoot {
                         let me = Me(userId: user.id, name: user.name, role: user.role, email: user.email)
                         try? ContextStore.saveMe(projectRoot: root, me: me)
                     }
-                    self?.refreshUsers()
+                    self?.refresh()
                 case .failure(let error):
                     self?.lastError = error.localizedDescription
                 }
             }
         }
+    }
+
+    // MARK: - Access control wrappers
+
+    /// True iff the currently identified user is a server-wide admin.
+    var isCurrentUserAdmin: Bool { currentUser?.isAdmin == true }
+
+    /// True iff the active project belongs to the currently identified user.
+    var isOwnerOfCurrentProject: Bool {
+        guard let me = currentUser else { return false }
+        let pid = currentProjectId.isEmpty ? "default" : currentProjectId
+        return projects.first(where: { $0.id == pid })?.createdBy == me.id
+    }
+
+    func setUserAdmin(id: String, isAdmin: Bool) {
+        rpcClient.setUserAdmin(id: id, isAdmin: isAdmin) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success: self?.refreshUsers()
+                case .failure(let err): self?.lastError = err.localizedDescription
+                }
+            }
+        }
+    }
+
+    func setProjectPassword(id: String, password: String, completion: ((Result<Void, ContextRPCError>) -> Void)? = nil) {
+        rpcClient.projectSetPassword(id: id, password: password) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    self?.refreshProjects()
+                    completion?(.success(()))
+                case .failure(let err):
+                    self?.lastError = err.localizedDescription
+                    completion?(.failure(err))
+                }
+            }
+        }
+    }
+
+    func joinProject(id: String, password: String, role: String = "", completion: ((Result<Void, ContextRPCError>) -> Void)? = nil) {
+        rpcClient.projectJoin(id: id, password: password, role: role) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    self?.notAMemberOfCurrentProject = false
+                    self?.switchProject(id: id)
+                    completion?(.success(()))
+                case .failure(let err):
+                    self?.lastError = err.localizedDescription
+                    completion?(.failure(err))
+                }
+            }
+        }
+    }
+
+    func leaveProject(id: String, userId: String = "") {
+        rpcClient.projectLeave(id: id, userId: userId) { [weak self] _ in
+            DispatchQueue.main.async {
+                self?.refreshProjectMembers()
+                self?.refreshProjects()
+            }
+        }
+    }
+
+    func refreshProjectMembers() {
+        let pid = currentProjectId.isEmpty ? "default" : currentProjectId
+        rpcClient.projectMembers(id: pid) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let members):
+                    self?.currentProjectMembers = members
+                    self?.notAMemberOfCurrentProject = false
+                case .failure(let err):
+                    if case .serverError(let code, _) = err, code == "not_a_member" || code == "identity_required" {
+                        self?.notAMemberOfCurrentProject = true
+                        self?.currentProjectMembers = []
+                    } else {
+                        self?.lastError = err.localizedDescription
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns true when the error means "you can't access this project"
+    /// — used by every refresh* to flip into the gated UI without spamming
+    /// red error toasts.
+    private func handleAccessError(_ error: ContextRPCError) -> Bool {
+        if case .serverError(let code, _) = error,
+           code == "not_a_member" || code == "identity_required" {
+            self.notAMemberOfCurrentProject = true
+            self.kvEntries = []; self.documents = []; self.entities = []
+            self.edges = []; self.events = []; self.locks = []
+            self.currentProjectMembers = []
+            return true
+        }
+        return false
     }
 
     func refreshKV(category: String = "") {
@@ -342,7 +450,9 @@ final class ContextStore: ObservableObject {
                     self?.kvEntries = entries
                     self?.isConnected = true
                     self?.lastError = nil
+                    self?.notAMemberOfCurrentProject = false
                 case .failure(let error):
+                    if self?.handleAccessError(error) == true { return }
                     self?.lastError = error.localizedDescription
                     self?.isConnected = false
                 }

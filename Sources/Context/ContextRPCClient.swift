@@ -17,6 +17,9 @@ final class ContextRPCClient: @unchecked Sendable {
     // Active project id is auto-injected into every request's params.
     // Empty string means "let the daemon fall back to the default project".
     private var _currentProjectId: String = ""
+    // Caller user id auto-injected so daemon can authorize per-user
+    // (admin checks, project membership). Empty means "anonymous".
+    private var _currentUserId: String = ""
 
     init(socketPath: String) {
         self.mode = .unixSocket(socketPath)
@@ -38,6 +41,51 @@ final class ContextRPCClient: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return _currentProjectId
+    }
+
+    func setCurrentUserId(_ id: String) {
+        lock.lock()
+        _currentUserId = id
+        lock.unlock()
+    }
+
+    private func currentUserId() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return _currentUserId
+    }
+
+    // MARK: - Access control
+
+    func setUserAdmin(id: String, isAdmin: Bool, completion: @escaping (Result<ContextUser, ContextRPCError>) -> Void) {
+        call(method: "context.user.set_admin",
+             params: ["id": id, "is_admin": isAdmin] as [String: Any],
+             completion: completion)
+    }
+
+    func projectSetPassword(id: String, password: String, completion: @escaping (Result<Void, ContextRPCError>) -> Void) {
+        callVoid(method: "context.project.set_password",
+                 params: ["id": id, "password": password],
+                 completion: completion)
+    }
+
+    func projectJoin(id: String, password: String, role: String = "", completion: @escaping (Result<Void, ContextRPCError>) -> Void) {
+        callVoid(method: "context.project.join",
+                 params: ["id": id, "password": password, "role": role],
+                 completion: completion)
+    }
+
+    func projectLeave(id: String, userId: String = "", completion: @escaping (Result<Void, ContextRPCError>) -> Void) {
+        callVoid(method: "context.project.leave",
+                 params: ["id": id, "user_id": userId],
+                 completion: completion)
+    }
+
+    func projectMembers(id: String, completion: @escaping (Result<[ContextProjectMember], ContextRPCError>) -> Void) {
+        call(method: "context.project.members", params: ["id": id]) {
+            (result: Result<MembersResponse, ContextRPCError>) in
+            completion(result.map(\.members))
+        }
     }
 
     // MARK: - Projects
@@ -364,6 +412,14 @@ final class ContextRPCClient: @unchecked Sendable {
                 finalParams["project_id"] = pid
             }
         }
+        // Auto-inject caller_user_id so the daemon can authorize per-user
+        // (admin checks, project membership). Only when explicitly set.
+        if finalParams["caller_user_id"] == nil {
+            let uid = currentUserId()
+            if !uid.isEmpty {
+                finalParams["caller_user_id"] = uid
+            }
+        }
 
         // Build and send request
         let request: [String: Any] = ["id": id, "method": method, "params": finalParams]
@@ -470,7 +526,10 @@ final class ContextRPCClient: @unchecked Sendable {
         case "auth", "ping", "hello",
              "context.project.list", "context.project.create",
              "context.project.rename", "context.project.delete",
-             "context.user.list", "context.user.create", "context.user.get", "context.user.delete":
+             "context.project.set_password", "context.project.join",
+             "context.project.leave", "context.project.members",
+             "context.user.list", "context.user.create", "context.user.get",
+             "context.user.delete", "context.user.set_admin":
             return true
         default:
             return false
@@ -566,5 +625,10 @@ private struct EventListResponse: Codable {
 
 private struct ProjectListResponse: Codable {
     let projects: [ContextProject]
+    let count: Int
+}
+
+private struct MembersResponse: Codable {
+    let members: [ContextProjectMember]
     let count: Int
 }

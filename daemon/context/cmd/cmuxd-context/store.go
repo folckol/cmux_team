@@ -31,14 +31,15 @@ func normalizeProjectID(id string) string {
 // --- Projects ---
 
 type Project struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	CreatedBy string `json:"created_by"`
-	CreatedAt int64  `json:"created_at"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	CreatedBy   string `json:"created_by"`
+	CreatedAt   int64  `json:"created_at"`
+	HasPassword bool   `json:"has_password"`
 }
 
 func (s *Store) ProjectList() ([]Project, error) {
-	rows, err := s.db.Query(`SELECT id, name, created_by, created_at FROM context_projects ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, created_by, created_at, password_hash FROM context_projects ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("project list: %w", err)
 	}
@@ -46,9 +47,11 @@ func (s *Store) ProjectList() ([]Project, error) {
 	var out []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedBy, &p.CreatedAt); err != nil {
+		var hash string
+		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedBy, &p.CreatedAt, &hash); err != nil {
 			return nil, err
 		}
+		p.HasPassword = hash != ""
 		out = append(out, p)
 	}
 	return out, rows.Err()
@@ -56,17 +59,22 @@ func (s *Store) ProjectList() ([]Project, error) {
 
 func (s *Store) ProjectGet(id string) (*Project, error) {
 	var p Project
-	err := s.db.QueryRow(`SELECT id, name, created_by, created_at FROM context_projects WHERE id = ?`, id).
-		Scan(&p.ID, &p.Name, &p.CreatedBy, &p.CreatedAt)
+	var hash string
+	err := s.db.QueryRow(`SELECT id, name, created_by, created_at, password_hash FROM context_projects WHERE id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.CreatedBy, &p.CreatedAt, &hash)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("project get: %w", err)
 	}
+	p.HasPassword = hash != ""
 	return &p, nil
 }
 
+// ProjectCreate inserts a project and (if createdBy is set) records the
+// creator as the first member with role "owner" — so the creator can
+// immediately use the project without a separate join step.
 func (s *Store) ProjectCreate(name, createdBy string) (*Project, error) {
 	if name == "" {
 		return nil, fmt.Errorf("name is required")
@@ -78,6 +86,9 @@ func (s *Store) ProjectCreate(name, createdBy string) (*Project, error) {
 		id, name, createdBy, now)
 	if err != nil {
 		return nil, fmt.Errorf("project create: %w", err)
+	}
+	if createdBy != "" {
+		_ = s.AddMember(id, createdBy, "owner")
 	}
 	return s.ProjectGet(id)
 }
@@ -136,18 +147,29 @@ type User struct {
 	Name      string `json:"name"`
 	Role      string `json:"role"`
 	Email     string `json:"email"`
+	IsAdmin   bool   `json:"is_admin"`
 	CreatedAt int64  `json:"created_at"`
 }
 
+// UserCreate inserts or updates a user. The very first user ever created
+// (table empty) is auto-promoted to admin so the server has a bootstrap
+// owner without out-of-band setup.
 func (s *Store) UserCreate(id, name, role, email string) (*User, error) {
 	if id == "" {
 		id = uuid.New().String()
 	}
+	// Bootstrap admin: only when this insert grows the user table from 0 → 1.
+	makeAdmin := 0
+	if existing, _ := s.UserGet(id); existing == nil {
+		if n, _ := s.CountUsers(); n == 0 {
+			makeAdmin = 1
+		}
+	}
 	now := time.Now().Unix()
 	_, err := s.db.Exec(
-		`INSERT INTO context_users (id, name, role, email, created_at) VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO context_users (id, name, role, email, is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET name = excluded.name, role = excluded.role, email = excluded.email`,
-		id, name, role, email, now)
+		id, name, role, email, makeAdmin, now)
 	if err != nil {
 		return nil, fmt.Errorf("user create: %w", err)
 	}
@@ -156,20 +178,22 @@ func (s *Store) UserCreate(id, name, role, email string) (*User, error) {
 
 func (s *Store) UserGet(id string) (*User, error) {
 	var u User
+	var adminFlag int
 	err := s.db.QueryRow(
-		`SELECT id, name, role, email, created_at FROM context_users WHERE id = ?`, id).
-		Scan(&u.ID, &u.Name, &u.Role, &u.Email, &u.CreatedAt)
+		`SELECT id, name, role, email, is_admin, created_at FROM context_users WHERE id = ?`, id).
+		Scan(&u.ID, &u.Name, &u.Role, &u.Email, &adminFlag, &u.CreatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("user get: %w", err)
 	}
+	u.IsAdmin = adminFlag != 0
 	return &u, nil
 }
 
 func (s *Store) UserList() ([]User, error) {
-	rows, err := s.db.Query(`SELECT id, name, role, email, created_at FROM context_users ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id, name, role, email, is_admin, created_at FROM context_users ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("user list: %w", err)
 	}
@@ -177,9 +201,11 @@ func (s *Store) UserList() ([]User, error) {
 	var users []User
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Name, &u.Role, &u.Email, &u.CreatedAt); err != nil {
+		var adminFlag int
+		if err := rows.Scan(&u.ID, &u.Name, &u.Role, &u.Email, &adminFlag, &u.CreatedAt); err != nil {
 			return nil, err
 		}
+		u.IsAdmin = adminFlag != 0
 		users = append(users, u)
 	}
 	return users, rows.Err()
