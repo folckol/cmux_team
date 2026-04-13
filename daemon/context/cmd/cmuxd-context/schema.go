@@ -288,6 +288,16 @@ func migrateV5(tx *sql.Tx) error {
 		// projects start empty and require an explicit join.
 		`INSERT OR IGNORE INTO context_project_members (project_id, user_id, role, joined_at)
 		 SELECT 'default', id, '', unixepoch() FROM context_users`,
+
+		// Bootstrap admin: promote the earliest user that exists at upgrade
+		// time, so teams upgrading from v4 don't end up without any admin.
+		// Only runs when no admin already exists (idempotent on re-runs and
+		// doesn't touch manually-set admins).
+		`UPDATE context_users SET is_admin = 1
+		 WHERE id = (
+			 SELECT id FROM context_users ORDER BY created_at ASC, id ASC LIMIT 1
+		 )
+		 AND NOT EXISTS (SELECT 1 FROM context_users WHERE is_admin = 1)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
