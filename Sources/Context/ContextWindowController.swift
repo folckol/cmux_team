@@ -102,6 +102,16 @@ struct ContextWindowView: View {
         return store.currentProjectMembers.contains(where: { $0.userId == me.id })
     }
 
+    /// Pre-populate the Identify-As inputs with the current user's values so
+    /// editing is "change-in-place". Only fills empty fields, so typing in
+    /// progress is never clobbered by a concurrent refresh.
+    private func prefillIdentityFields() {
+        guard let me = store.currentUser else { return }
+        if newUserName.isEmpty { newUserName = me.name }
+        if newUserRole.isEmpty { newUserRole = me.role }
+        if newUserEmail.isEmpty { newUserEmail = me.email }
+    }
+
     private var isGated: Bool {
         // Admins always see data; the flag might be set transiently during
         // startup races but the UI should never lock them out.
@@ -1101,10 +1111,15 @@ struct ContextWindowView: View {
                     Button(store.currentUser == nil ? "Identify" : "Update") {
                         guard !newUserName.isEmpty else { return }
                         store.identifyAs(name: newUserName, role: newUserRole, email: newUserEmail)
+                        // Don't wipe fields — user should see what they just
+                        // saved; any remote changes will re-sync via the
+                        // onChange hook below.
                     }
                     .font(.system(size: 11, weight: .medium))
                     .disabled(newUserName.isEmpty)
                 }
+                .onAppear { prefillIdentityFields() }
+                .onChange(of: store.currentUser?.id) { _, _ in prefillIdentityFields() }
 
                 Divider()
 
