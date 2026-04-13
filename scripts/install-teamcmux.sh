@@ -68,10 +68,77 @@ if [[ -x "$LSREG" ]]; then
 fi
 mdimport "$DEST" >/dev/null 2>&1 || true
 
-echo "==> [5/5] Launching"
+echo '==> [5/6] Wiring cmux CLI on PATH (so `cmux context` works everywhere)'
+# Why: the stock cmux.app's bin/ dir often appears earlier in PATH and ships
+# without `cmux context`. We install a thin shim to TeamCmux's binary at the
+# *first* writable PATH entry, and — if the stock cmux.app exists — also
+# replace its CLI with the same shim (backing the original up). Result:
+# any shell, any agent, any session resolves `cmux` to the TeamCmux binary.
+TEAMCMUX_BIN="${DEST}/Contents/Resources/bin/cmux"
+if [[ ! -x "$TEAMCMUX_BIN" ]]; then
+    echo "warning: TeamCmux CLI not found at $TEAMCMUX_BIN — context commands will not be available from shell" >&2
+else
+    SHIM_BODY=$(cat <<EOF
+#!/usr/bin/env bash
+# cmux → TeamCmux CLI shim (managed by scripts/install-teamcmux.sh).
+exec "$TEAMCMUX_BIN" "\$@"
+EOF
+)
+    install_shim() {
+        local target="$1"
+        local needs_sudo="$2"
+        if [[ "$needs_sudo" == "1" ]]; then
+            echo "$SHIM_BODY" | sudo tee "$target" >/dev/null && sudo chmod +x "$target"
+        else
+            mkdir -p "$(dirname "$target")"
+            echo "$SHIM_BODY" > "$target" && chmod +x "$target"
+        fi
+    }
+
+    # 1. Drop a shim into the user's ~/.local/bin (early on PATH for most setups).
+    install_shim "$HOME/.local/bin/cmux" "0" || true
+    echo "  shim → $HOME/.local/bin/cmux"
+
+    # 2. Detect cmux instances earlier on PATH and shadow them.
+    #    `set -e` plus a per-iteration `continue` inside `for ... in $PATH` was
+    #    swallowing the body silently in some shells — split via `tr` instead.
+    while IFS= read -r dir; do
+        [[ -z "$dir" ]] && continue
+        candidate="$dir/cmux"
+        # Skip TeamCmux's own bin dir and the shim we just wrote.
+        [[ "$candidate" == "$TEAMCMUX_BIN" ]] && continue
+        [[ "$candidate" == "$HOME/.local/bin/cmux" ]] && continue
+        [[ -f "$candidate" ]] || continue
+        # Don't touch our own shims (idempotent re-runs).
+        if grep -q "TeamCmux CLI shim" "$candidate" 2>/dev/null; then continue; fi
+
+        backup="${candidate}.pre-teamcmux"
+        if [[ ! -e "$backup" ]]; then
+            if [[ -w "$candidate" ]]; then
+                cp -p "$candidate" "$backup"
+            else
+                sudo cp -p "$candidate" "$backup" 2>/dev/null || true
+            fi
+        fi
+        if [[ -w "$candidate" ]]; then
+            install_shim "$candidate" "0"
+        else
+            install_shim "$candidate" "1" || { echo "  skip $candidate (no permission)" >&2; continue; }
+        fi
+        echo "  shadowed: $candidate (backup: $backup)"
+    done < <(printf '%s' "$PATH" | tr ':' '\n')
+
+    # 3. Hash refresh hint.
+    hash -r 2>/dev/null || true
+fi
+
+echo "==> [6/6] Launching"
 open "$DEST"
 
 echo ""
 echo "Installed: $DEST"
 echo "Bundle id: $BUNDLE_ID"
+echo "CLI shim:  uses TeamCmux for every cmux invocation"
 echo "Ищи в Launchpad/Spotlight как ${APP_NAME}."
+echo ""
+echo 'Verify: open a new terminal and run  `cmux context show`'
