@@ -1729,12 +1729,20 @@ struct CMUXCLI {
         if command != "__tmux-compat",
            command != "claude-teams",
            command != "codex",
+           command != "context",
            (commandArgs.contains("--help") || commandArgs.contains("-h")) {
             if dispatchSubcommandHelp(command: command, commandArgs: commandArgs) {
                 return
             }
             print("Unknown command '\(command)'. Run 'cmux help' to see available commands.")
             return
+        }
+
+        // `context` owns its own help/usage rendering inside ContextCLI; route
+        // through it so flags like --help land in the right dispatcher
+        // instead of the generic "Unknown command" path above.
+        if command == "context" {
+            exit(ContextCLI.run(args: commandArgs))
         }
 
         if command == "welcome" {
