@@ -67,6 +67,16 @@ final class ContextStore: ObservableObject {
     /// Reconnect to a different server
     func connectToServer(host: String, port: Int, token: String) {
         self.rpcClient = ContextRPCClient(host: host, port: port, token: token)
+        // Re-hydrate auto-inject state on the fresh client, otherwise the
+        // first refreshes go out without caller_user_id / project_id and the
+        // daemon returns identity_required, flipping the UI into the gated
+        // state until the user manually re-identifies.
+        if let uid = currentUser?.id, !uid.isEmpty {
+            rpcClient.setCurrentUserId(uid)
+        }
+        if !currentProjectId.isEmpty {
+            rpcClient.setCurrentProjectId(currentProjectId)
+        }
         self.isConnected = false
         self.lastError = nil
         refresh()
@@ -76,6 +86,12 @@ final class ContextStore: ObservableObject {
     func connectToLocal(socketPath: String? = nil) {
         let path = socketPath ?? ContextStore.defaultSocketPath()
         self.rpcClient = ContextRPCClient(socketPath: path)
+        if let uid = currentUser?.id, !uid.isEmpty {
+            rpcClient.setCurrentUserId(uid)
+        }
+        if !currentProjectId.isEmpty {
+            rpcClient.setCurrentProjectId(currentProjectId)
+        }
         self.isConnected = false
         self.lastError = nil
         refresh()
@@ -432,10 +448,17 @@ final class ContextStore: ObservableObject {
 
     /// Returns true when the error means "you can't access this project"
     /// — used by every refresh* to flip into the gated UI without spamming
-    /// red error toasts.
+    /// red error toasts. Admins never get gated; if we see this error for an
+    /// admin it's a stale caller_user_id and a retry will resolve it.
     private func handleAccessError(_ error: ContextRPCError) -> Bool {
         if case .serverError(let code, _) = error,
            code == "not_a_member" || code == "identity_required" {
+            if isCurrentUserAdmin {
+                // Admin sees everything — don't flip the gate. The refresh
+                // that triggered this likely raced init; next tick will
+                // succeed with caller_user_id populated.
+                return true
+            }
             self.notAMemberOfCurrentProject = true
             self.kvEntries = []; self.documents = []; self.entities = []
             self.edges = []; self.events = []; self.locks = []

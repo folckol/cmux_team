@@ -289,6 +289,14 @@ func migrateV5(tx *sql.Tx) error {
 		`INSERT OR IGNORE INTO context_project_members (project_id, user_id, role, joined_at)
 		 SELECT 'default', id, '', unixepoch() FROM context_users`,
 
+		// Also seed every existing project with its creator as the first
+		// "owner" member. Covers projects that were created between the v4
+		// rollout and the membership feature, or edge cases where the
+		// in-code ProjectCreate membership insert silently failed.
+		`INSERT OR IGNORE INTO context_project_members (project_id, user_id, role, joined_at)
+		 SELECT id, created_by, 'owner', unixepoch() FROM context_projects
+		 WHERE created_by != ''`,
+
 		// Bootstrap admin: promote the earliest user that exists at upgrade
 		// time, so teams upgrading from v4 don't end up without any admin.
 		// Only runs when no admin already exists (idempotent on re-runs and

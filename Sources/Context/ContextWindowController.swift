@@ -103,7 +103,10 @@ struct ContextWindowView: View {
     }
 
     private var isGated: Bool {
-        store.isUnidentified || store.notAMemberOfCurrentProject
+        // Admins always see data; the flag might be set transiently during
+        // startup races but the UI should never lock them out.
+        if store.isCurrentUserAdmin { return false }
+        return store.isUnidentified || store.notAMemberOfCurrentProject
     }
 
     /// Full-panel banner shown when shared context is not accessible yet.
