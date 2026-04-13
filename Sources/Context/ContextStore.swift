@@ -15,9 +15,19 @@ final class ContextStore: ObservableObject {
     @Published var users: [ContextUser] = []
     @Published var events: [ContextEvent] = []
     @Published var locks: [ContextLock] = []
+    @Published var projects: [ContextProject] = []
+    @Published var currentProjectId: String = ""
     @Published var currentUser: ContextUser?
     @Published var isConnected: Bool = false
     @Published var lastError: String?
+
+    /// Display name of the current project. "" / "default" → "Default".
+    var currentProjectName: String {
+        if currentProjectId.isEmpty || currentProjectId == "default" {
+            return projects.first(where: { $0.id == "default" })?.name ?? "Default"
+        }
+        return projects.first(where: { $0.id == currentProjectId })?.name ?? currentProjectId
+    }
 
     private var rpcClient: ContextRPCClient
     private(set) var projectRoot: String?
@@ -69,6 +79,14 @@ final class ContextStore: ObservableObject {
         var host: String
         var port: Int
         var token: String
+        // projectId selects which team-context project to use on this connection.
+        // Empty → daemon falls back to "default" (backward compatible).
+        var projectId: String?
+
+        enum CodingKeys: String, CodingKey {
+            case mode, host, port, token
+            case projectId = "project_id"
+        }
     }
 
     static func projectConfigURL(projectRoot: String) -> URL {
@@ -102,6 +120,10 @@ final class ContextStore: ObservableObject {
         } else {
             connectToLocal()
         }
+        // Select project scope on the fresh client before the refresh kicks in.
+        let pid = config.projectId ?? ""
+        self.currentProjectId = pid
+        rpcClient.setCurrentProjectId(pid)
     }
 
     static func defaultSocketPath() -> String {
@@ -116,12 +138,91 @@ final class ContextStore: ObservableObject {
 
     func refresh() {
         Task {
+            await refreshProjects()
             await refreshKV()
             await refreshDocs()
             await refreshEntities()
             await refreshEdges()
             await refreshUsers()
             await refreshLocks()
+        }
+    }
+
+    // MARK: - Projects
+
+    func refreshProjects() {
+        rpcClient.projectList { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let list):
+                    self?.projects = list
+                    // If no current project is selected but default exists, lock in default.
+                    if let self, self.currentProjectId.isEmpty, list.contains(where: { $0.id == "default" }) {
+                        self.currentProjectId = "default"
+                        self.rpcClient.setCurrentProjectId("default")
+                    }
+                case .failure(let error):
+                    self?.lastError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Switch active project: change scope and reload all per-project caches.
+    /// Connection is reused (no reconnect).
+    func switchProject(id: String) {
+        guard id != currentProjectId else { return }
+        currentProjectId = id
+        rpcClient.setCurrentProjectId(id)
+        // Persist selection to the per-workspace config so next launch sticks.
+        if let root = projectRoot, var cfg = ContextStore.loadProjectConfig(projectRoot: root) {
+            cfg.projectId = id
+            try? ContextStore.saveProjectConfig(projectRoot: root, config: cfg)
+        }
+        kvEntries = []; documents = []; entities = []; edges = []; locks = []; events = []
+        refresh()
+    }
+
+    func createProject(name: String, completion: ((Result<ContextProject, ContextRPCError>) -> Void)? = nil) {
+        rpcClient.projectCreate(name: name, author: currentAuthorId) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let project):
+                    self?.refreshProjects()
+                    self?.switchProject(id: project.id)
+                    completion?(.success(project))
+                case .failure(let error):
+                    self?.lastError = error.localizedDescription
+                    completion?(.failure(error))
+                }
+            }
+        }
+    }
+
+    func renameProject(id: String, name: String) {
+        rpcClient.projectRename(id: id, name: name, author: currentAuthorId) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success: self?.refreshProjects()
+                case .failure(let error): self?.lastError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func deleteProject(id: String) {
+        rpcClient.projectDelete(id: id, author: currentAuthorId) { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success:
+                    if self?.currentProjectId == id {
+                        self?.switchProject(id: "default")
+                    }
+                    self?.refreshProjects()
+                case .failure(let error):
+                    self?.lastError = error.localizedDescription
+                }
+            }
         }
     }
 

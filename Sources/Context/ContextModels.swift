@@ -89,6 +89,21 @@ struct ContextEdge: Codable, Sendable, Equatable, Identifiable {
     }
 }
 
+// MARK: - Project
+
+struct ContextProject: Codable, Sendable, Equatable, Identifiable {
+    let id: String
+    let name: String
+    let createdBy: String?
+    let createdAt: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case id, name
+        case createdBy = "created_by"
+        case createdAt = "created_at"
+    }
+}
+
 // MARK: - User
 
 struct ContextUser: Codable, Sendable, Equatable, Identifiable {
@@ -125,7 +140,8 @@ struct ContextEvent: Codable, Sendable, Equatable, Identifiable {
 // MARK: - Lock
 
 struct ContextLock: Codable, Sendable, Equatable, Identifiable {
-    var id: String { "\(kind):\(targetId)" }
+    var id: String { "\(projectId ?? ""):\(kind):\(targetId)" }
+    let projectId: String?
     let kind: String
     let targetId: String
     let userId: String
@@ -134,6 +150,7 @@ struct ContextLock: Codable, Sendable, Equatable, Identifiable {
 
     enum CodingKeys: String, CodingKey {
         case kind
+        case projectId = "project_id"
         case targetId = "target_id"
         case userId = "user_id"
         case userName = "user_name"

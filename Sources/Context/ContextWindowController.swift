@@ -75,12 +75,19 @@ struct ContextWindowView: View {
     @State private var newCategoryName = ""
     @State private var newEntityName = ""
     @State private var newEntityType = "service"
+    @State private var showingNewProjectSheet = false
+    @State private var newProjectName = ""
 
     private let entityTypes = ["role", "person", "service", "task", "decision", "dependency"]
 
     private var allCategories: [String] {
         let cats = Set(store.documents.map(\.category).filter { !$0.isEmpty })
         return cats.sorted()
+    }
+
+    /// "default" when nothing is explicitly selected — matches daemon fallback.
+    private var effectiveProjectId: String {
+        store.currentProjectId.isEmpty ? "default" : store.currentProjectId
     }
 
     private var docsInSelectedCategory: [ContextDocument] {
@@ -108,6 +115,36 @@ struct ContextWindowView: View {
                     .buttonStyle(.plain)
                 }
                 Spacer()
+
+                // Project selector
+                Menu {
+                    ForEach(store.projects) { p in
+                        Button(action: { store.switchProject(id: p.id) }) {
+                            HStack {
+                                Text(p.name)
+                                if p.id == effectiveProjectId { Image(systemName: "checkmark") }
+                            }
+                        }
+                    }
+                    if !store.projects.isEmpty { Divider() }
+                    Button(action: {
+                        newProjectName = ""
+                        showingNewProjectSheet = true
+                    }) {
+                        Label("New project…", systemImage: "plus")
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "folder").font(.system(size: 10))
+                        Text(store.currentProjectName).font(.system(size: 11, weight: .medium)).lineLimit(1)
+                        Image(systemName: "chevron.down").font(.system(size: 8))
+                    }
+                    .padding(.horizontal, 6).padding(.vertical, 3)
+                    .background(Color(nsColor: .textBackgroundColor).opacity(0.3)).cornerRadius(4)
+                    .frame(maxWidth: 160)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
 
                 // Search
                 HStack(spacing: 4) {
@@ -142,8 +179,31 @@ struct ContextWindowView: View {
             }
         }
         .frame(minWidth: 400, minHeight: 300)
+        .sheet(isPresented: $showingNewProjectSheet) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("New project").font(.headline)
+                TextField("Project name", text: $newProjectName)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 260)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showingNewProjectSheet = false }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Create") {
+                        let name = newProjectName.trimmingCharacters(in: .whitespaces)
+                        guard !name.isEmpty else { return }
+                        store.createProject(name: name)
+                        showingNewProjectSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(newProjectName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+            .padding(16)
+        }
         .onAppear { store.refresh() }
         .onReceive(Timer.publish(every: 5, on: .main, in: .common).autoconnect()) { _ in
+            store.refreshProjects()
             store.refreshLocks()
             store.refreshKV()
             store.refreshDocs()
@@ -1138,6 +1198,79 @@ struct ContextWindowView: View {
                         Button("Export JSON") {
                             // TODO: save dialog
                         }.font(.system(size: 11))
+                    }
+                }
+
+                Divider()
+
+                // Projects management
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("PROJECTS").font(.system(size: 10, weight: .bold)).foregroundColor(.secondary).tracking(0.5)
+                        Spacer()
+                        Button(action: {
+                            newProjectName = ""
+                            showingNewProjectSheet = true
+                        }) {
+                            Label("New", systemImage: "plus").font(.system(size: 10))
+                        }
+                        .buttonStyle(.plain).foregroundColor(.accentColor)
+                    }
+                    Text("One connection can hold multiple projects. Data in each project is isolated.")
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+
+                    if store.projects.isEmpty {
+                        Text("No projects yet").font(.system(size: 11)).foregroundColor(.secondary)
+                    } else {
+                        ForEach(store.projects) { p in
+                            HStack(spacing: 8) {
+                                Button(action: { store.switchProject(id: p.id) }) {
+                                    Image(systemName: p.id == effectiveProjectId ? "largecircle.fill.circle" : "circle")
+                                        .foregroundColor(p.id == effectiveProjectId ? .accentColor : .secondary)
+                                }.buttonStyle(.plain)
+
+                                Text(p.name).font(.system(size: 11, weight: p.id == effectiveProjectId ? .semibold : .regular))
+
+                                Text(p.id == "default" ? "(built-in)" : String(p.id.prefix(8)))
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.secondary.opacity(0.6))
+
+                                Spacer()
+
+                                if p.id != "default" {
+                                    Button(action: {
+                                        let alert = NSAlert()
+                                        alert.messageText = "Rename project"
+                                        alert.informativeText = "New name for \"\(p.name)\":"
+                                        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+                                        field.stringValue = p.name
+                                        alert.accessoryView = field
+                                        alert.addButton(withTitle: "Rename")
+                                        alert.addButton(withTitle: "Cancel")
+                                        if alert.runModal() == .alertFirstButtonReturn {
+                                            let trimmed = field.stringValue.trimmingCharacters(in: .whitespaces)
+                                            if !trimmed.isEmpty { store.renameProject(id: p.id, name: trimmed) }
+                                        }
+                                    }) {
+                                        Image(systemName: "pencil").font(.system(size: 10))
+                                    }.buttonStyle(.plain).foregroundColor(.secondary)
+
+                                    Button(action: {
+                                        let alert = NSAlert()
+                                        alert.messageText = "Delete project \"\(p.name)\"?"
+                                        alert.informativeText = "All KV entries, docs, entities, edges, and events in this project will be permanently deleted."
+                                        alert.alertStyle = .warning
+                                        alert.addButton(withTitle: "Delete")
+                                        alert.addButton(withTitle: "Cancel")
+                                        if alert.runModal() == .alertFirstButtonReturn {
+                                            store.deleteProject(id: p.id)
+                                        }
+                                    }) {
+                                        Image(systemName: "trash").font(.system(size: 10))
+                                    }.buttonStyle(.plain).foregroundColor(.red.opacity(0.7))
+                                }
+                            }
+                        }
                     }
                 }
 

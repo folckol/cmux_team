@@ -14,6 +14,9 @@ final class ContextRPCClient: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.cmux.context-rpc", qos: .userInitiated)
     private var nextID: Int = 1
     private let lock = NSLock()
+    // Active project id is auto-injected into every request's params.
+    // Empty string means "let the daemon fall back to the default project".
+    private var _currentProjectId: String = ""
 
     init(socketPath: String) {
         self.mode = .unixSocket(socketPath)
@@ -21,6 +24,40 @@ final class ContextRPCClient: @unchecked Sendable {
 
     init(host: String, port: Int, token: String) {
         self.mode = .tcp(host: host, port: port, token: token)
+    }
+
+    // MARK: - Project scope
+
+    func setCurrentProjectId(_ id: String) {
+        lock.lock()
+        _currentProjectId = id
+        lock.unlock()
+    }
+
+    private func currentProjectId() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return _currentProjectId
+    }
+
+    // MARK: - Projects
+
+    func projectList(completion: @escaping (Result<[ContextProject], ContextRPCError>) -> Void) {
+        call(method: "context.project.list", params: [:]) { (result: Result<ProjectListResponse, ContextRPCError>) in
+            completion(result.map(\.projects))
+        }
+    }
+
+    func projectCreate(name: String, author: String = "", completion: @escaping (Result<ContextProject, ContextRPCError>) -> Void) {
+        call(method: "context.project.create", params: ["name": name, "author": author], completion: completion)
+    }
+
+    func projectRename(id: String, name: String, author: String = "", completion: @escaping (Result<ContextProject, ContextRPCError>) -> Void) {
+        call(method: "context.project.rename", params: ["id": id, "name": name, "author": author], completion: completion)
+    }
+
+    func projectDelete(id: String, author: String = "", completion: @escaping (Result<Void, ContextRPCError>) -> Void) {
+        callVoid(method: "context.project.delete", params: ["id": id, "author": author], completion: completion)
     }
 
     // MARK: - KV
@@ -318,8 +355,18 @@ final class ContextRPCClient: @unchecked Sendable {
         }
         defer { close(fd) }
 
+        // Auto-inject project_id (unless caller already set it, or this is a
+        // non-scoped method like auth / ping / project management).
+        var finalParams = params
+        if !isProjectScopeless(method: method) && finalParams["project_id"] == nil {
+            let pid = currentProjectId()
+            if !pid.isEmpty {
+                finalParams["project_id"] = pid
+            }
+        }
+
         // Build and send request
-        let request: [String: Any] = ["id": id, "method": method, "params": params]
+        let request: [String: Any] = ["id": id, "method": method, "params": finalParams]
         let requestData = try JSONSerialization.data(withJSONObject: request)
         var line = requestData
         line.append(contentsOf: [UInt8(ascii: "\n")])
@@ -416,6 +463,20 @@ final class ContextRPCClient: @unchecked Sendable {
         }
     }
 
+    /// Methods that must not receive an auto-injected project_id.
+    /// These are either connection-level (auth, ping, hello) or manage projects themselves.
+    private func isProjectScopeless(method: String) -> Bool {
+        switch method {
+        case "auth", "ping", "hello",
+             "context.project.list", "context.project.create",
+             "context.project.rename", "context.project.delete",
+             "context.user.list", "context.user.create", "context.user.get", "context.user.delete":
+            return true
+        default:
+            return false
+        }
+    }
+
     private func nextRequestID() -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -500,5 +561,10 @@ private struct LockListResponse: Codable {
 
 private struct EventListResponse: Codable {
     let events: [ContextEvent]
+    let count: Int
+}
+
+private struct ProjectListResponse: Codable {
+    let projects: [ContextProject]
     let count: Int
 }

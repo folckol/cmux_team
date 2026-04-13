@@ -19,6 +19,116 @@ func NewStore(db *sql.DB) *Store {
 	return &Store{db: db}
 }
 
+// normalizeProjectID maps empty IDs to the default project so older clients
+// that don't know about projects keep working transparently.
+func normalizeProjectID(id string) string {
+	if id == "" {
+		return DefaultProjectID
+	}
+	return id
+}
+
+// --- Projects ---
+
+type Project struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	CreatedBy string `json:"created_by"`
+	CreatedAt int64  `json:"created_at"`
+}
+
+func (s *Store) ProjectList() ([]Project, error) {
+	rows, err := s.db.Query(`SELECT id, name, created_by, created_at FROM context_projects ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("project list: %w", err)
+	}
+	defer rows.Close()
+	var out []Project
+	for rows.Next() {
+		var p Project
+		if err := rows.Scan(&p.ID, &p.Name, &p.CreatedBy, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ProjectGet(id string) (*Project, error) {
+	var p Project
+	err := s.db.QueryRow(`SELECT id, name, created_by, created_at FROM context_projects WHERE id = ?`, id).
+		Scan(&p.ID, &p.Name, &p.CreatedBy, &p.CreatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("project get: %w", err)
+	}
+	return &p, nil
+}
+
+func (s *Store) ProjectCreate(name, createdBy string) (*Project, error) {
+	if name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	id := uuid.New().String()
+	now := time.Now().Unix()
+	_, err := s.db.Exec(
+		`INSERT INTO context_projects (id, name, created_by, created_at) VALUES (?, ?, ?, ?)`,
+		id, name, createdBy, now)
+	if err != nil {
+		return nil, fmt.Errorf("project create: %w", err)
+	}
+	return s.ProjectGet(id)
+}
+
+func (s *Store) ProjectRename(id, name string) (*Project, error) {
+	if id == "" || name == "" {
+		return nil, fmt.Errorf("id and name are required")
+	}
+	res, err := s.db.Exec(`UPDATE context_projects SET name = ? WHERE id = ?`, name, id)
+	if err != nil {
+		return nil, fmt.Errorf("project rename: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, fmt.Errorf("project not found: %s", id)
+	}
+	return s.ProjectGet(id)
+}
+
+// ProjectDelete removes a project and cascades its data in all tables.
+// The built-in 'default' project cannot be deleted.
+func (s *Store) ProjectDelete(id string) error {
+	if id == "" {
+		return fmt.Errorf("id is required")
+	}
+	if id == DefaultProjectID {
+		return fmt.Errorf("cannot delete default project")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("project delete tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	for _, table := range []string{"context_kv", "context_docs", "context_entities", "context_edges", "context_events"} {
+		if _, err := tx.Exec(`DELETE FROM `+table+` WHERE project_id = ?`, id); err != nil {
+			return fmt.Errorf("delete from %s: %w", table, err)
+		}
+	}
+
+	res, err := tx.Exec(`DELETE FROM context_projects WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete project row: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("project not found: %s", id)
+	}
+	return tx.Commit()
+}
+
 // --- Users ---
 
 type User struct {
@@ -90,22 +200,25 @@ func (s *Store) UserDelete(id string) error {
 // --- Events / audit log ---
 
 type Event struct {
-	ID       int64  `json:"id"`
-	Ts       int64  `json:"ts"`
-	UserID   string `json:"user_id"`
-	Action   string `json:"action"`
-	Kind     string `json:"kind"`
-	TargetID string `json:"target_id"`
-	Summary  string `json:"summary"`
+	ID        int64  `json:"id"`
+	Ts        int64  `json:"ts"`
+	ProjectID string `json:"project_id"`
+	UserID    string `json:"user_id"`
+	Action    string `json:"action"`
+	Kind      string `json:"kind"`
+	TargetID  string `json:"target_id"`
+	Summary   string `json:"summary"`
 }
 
-func (s *Store) LogEvent(userID, action, kind, targetID, summary string) {
+func (s *Store) LogEvent(projectID, userID, action, kind, targetID, summary string) {
+	projectID = normalizeProjectID(projectID)
 	_, _ = s.db.Exec(
-		`INSERT INTO context_events (user_id, action, kind, target_id, summary) VALUES (?, ?, ?, ?, ?)`,
-		userID, action, kind, targetID, summary)
+		`INSERT INTO context_events (project_id, user_id, action, kind, target_id, summary) VALUES (?, ?, ?, ?, ?, ?)`,
+		projectID, userID, action, kind, targetID, summary)
 }
 
-func (s *Store) EventList(limit int, userID string) ([]Event, error) {
+func (s *Store) EventList(projectID string, limit int, userID string) ([]Event, error) {
+	projectID = normalizeProjectID(projectID)
 	if limit <= 0 {
 		limit = 50
 	}
@@ -113,12 +226,14 @@ func (s *Store) EventList(limit int, userID string) ([]Event, error) {
 	var err error
 	if userID != "" {
 		rows, err = s.db.Query(
-			`SELECT id, ts, user_id, action, kind, target_id, summary FROM context_events WHERE user_id = ? ORDER BY ts DESC LIMIT ?`,
-			userID, limit)
+			`SELECT id, ts, project_id, user_id, action, kind, target_id, summary FROM context_events
+			 WHERE project_id = ? AND user_id = ? ORDER BY ts DESC LIMIT ?`,
+			projectID, userID, limit)
 	} else {
 		rows, err = s.db.Query(
-			`SELECT id, ts, user_id, action, kind, target_id, summary FROM context_events ORDER BY ts DESC LIMIT ?`,
-			limit)
+			`SELECT id, ts, project_id, user_id, action, kind, target_id, summary FROM context_events
+			 WHERE project_id = ? ORDER BY ts DESC LIMIT ?`,
+			projectID, limit)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("event list: %w", err)
@@ -127,7 +242,7 @@ func (s *Store) EventList(limit int, userID string) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.ID, &e.Ts, &e.UserID, &e.Action, &e.Kind, &e.TargetID, &e.Summary); err != nil {
+		if err := rows.Scan(&e.ID, &e.Ts, &e.ProjectID, &e.UserID, &e.Action, &e.Kind, &e.TargetID, &e.Summary); err != nil {
 			return nil, err
 		}
 		events = append(events, e)
@@ -138,6 +253,7 @@ func (s *Store) EventList(limit int, userID string) ([]Event, error) {
 // --- Key-Value ---
 
 type KVEntry struct {
+	ProjectID string   `json:"project_id"`
 	Key       string   `json:"key"`
 	Value     string   `json:"value"`
 	Category  string   `json:"category"`
@@ -148,34 +264,37 @@ type KVEntry struct {
 	UpdatedAt int64    `json:"updated_at"`
 }
 
-func (s *Store) KVGet(key string) (*KVEntry, error) {
+func (s *Store) KVGet(projectID, key string) (*KVEntry, error) {
+	projectID = normalizeProjectID(projectID)
 	row := s.db.QueryRow(
-		`SELECT key, value, category, tags, created_by, updated_by, created_at, updated_at
-		 FROM context_kv WHERE key = ?`, key)
+		`SELECT project_id, key, value, category, tags, created_by, updated_by, created_at, updated_at
+		 FROM context_kv WHERE project_id = ? AND key = ?`, projectID, key)
 	return scanKVEntry(row)
 }
 
-func (s *Store) KVSet(key, value, category string, tags []string, author string) (*KVEntry, error) {
+func (s *Store) KVSet(projectID, key, value, category string, tags []string, author string) (*KVEntry, error) {
+	projectID = normalizeProjectID(projectID)
 	tagsJSON, _ := json.Marshal(tags)
 	now := time.Now().Unix()
 	_, err := s.db.Exec(
-		`INSERT INTO context_kv (key, value, category, tags, created_by, updated_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(key) DO UPDATE SET
+		`INSERT INTO context_kv (project_id, key, value, category, tags, created_by, updated_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(project_id, key) DO UPDATE SET
 			value = excluded.value,
 			category = excluded.category,
 			tags = excluded.tags,
 			updated_by = excluded.updated_by,
 			updated_at = excluded.updated_at`,
-		key, value, category, string(tagsJSON), author, author, now, now)
+		projectID, key, value, category, string(tagsJSON), author, author, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("kv set: %w", err)
 	}
-	return s.KVGet(key)
+	return s.KVGet(projectID, key)
 }
 
-func (s *Store) KVDelete(key string) error {
-	res, err := s.db.Exec(`DELETE FROM context_kv WHERE key = ?`, key)
+func (s *Store) KVDelete(projectID, key string) error {
+	projectID = normalizeProjectID(projectID)
+	res, err := s.db.Exec(`DELETE FROM context_kv WHERE project_id = ? AND key = ?`, projectID, key)
 	if err != nil {
 		return fmt.Errorf("kv delete: %w", err)
 	}
@@ -186,9 +305,11 @@ func (s *Store) KVDelete(key string) error {
 	return nil
 }
 
-func (s *Store) KVList(category, prefix string) ([]KVEntry, error) {
-	query := `SELECT key, value, category, tags, created_by, updated_by, created_at, updated_at FROM context_kv WHERE 1=1`
-	var args []any
+func (s *Store) KVList(projectID, category, prefix string) ([]KVEntry, error) {
+	projectID = normalizeProjectID(projectID)
+	query := `SELECT project_id, key, value, category, tags, created_by, updated_by, created_at, updated_at
+	          FROM context_kv WHERE project_id = ?`
+	args := []any{projectID}
 	if category != "" {
 		query += ` AND category = ?`
 		args = append(args, category)
@@ -219,7 +340,7 @@ func (s *Store) KVList(category, prefix string) ([]KVEntry, error) {
 func scanKVEntry(row *sql.Row) (*KVEntry, error) {
 	var e KVEntry
 	var tagsJSON string
-	err := row.Scan(&e.Key, &e.Value, &e.Category, &tagsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
+	err := row.Scan(&e.ProjectID, &e.Key, &e.Value, &e.Category, &tagsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -236,7 +357,7 @@ func scanKVEntry(row *sql.Row) (*KVEntry, error) {
 func scanKVEntryFromRows(rows *sql.Rows) (*KVEntry, error) {
 	var e KVEntry
 	var tagsJSON string
-	err := rows.Scan(&e.Key, &e.Value, &e.Category, &tagsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
+	err := rows.Scan(&e.ProjectID, &e.Key, &e.Value, &e.Category, &tagsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("scan kv row: %w", err)
 	}
@@ -251,6 +372,7 @@ func scanKVEntryFromRows(rows *sql.Rows) (*KVEntry, error) {
 
 type Document struct {
 	ID          string   `json:"id"`
+	ProjectID   string   `json:"project_id"`
 	Title       string   `json:"title"`
 	Body        string   `json:"body"`
 	Category    string   `json:"category"`
@@ -303,30 +425,34 @@ func splitLines(s string) []string {
 	return strings.Split(s, "\n")
 }
 
-func (s *Store) DocGet(id string) (*Document, error) {
+// DocGet fetches by id, scoped to project. Returns nil if not found in that project.
+func (s *Store) DocGet(projectID, id string) (*Document, error) {
+	projectID = normalizeProjectID(projectID)
 	row := s.db.QueryRow(
-		`SELECT id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at
-		 FROM context_docs WHERE id = ?`, id)
+		`SELECT id, project_id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at
+		 FROM context_docs WHERE id = ? AND project_id = ?`, id, projectID)
 	return scanDocument(row)
 }
 
-func (s *Store) DocCreate(title, body, category string, tags []string, author string) (*Document, error) {
+func (s *Store) DocCreate(projectID, title, body, category string, tags []string, author string) (*Document, error) {
+	projectID = normalizeProjectID(projectID)
 	id := uuid.New().String()
 	tagsJSON, _ := json.Marshal(tags)
 	lineAuthors := reblameLines("", body, nil, author)
 	lineAuthorsJSON, _ := json.Marshal(lineAuthors)
 	now := time.Now().Unix()
 	_, err := s.db.Exec(
-		`INSERT INTO context_docs (id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, title, body, category, string(tagsJSON), author, author, string(lineAuthorsJSON), now, now)
+		`INSERT INTO context_docs (id, project_id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, projectID, title, body, category, string(tagsJSON), author, author, string(lineAuthorsJSON), now, now)
 	if err != nil {
 		return nil, fmt.Errorf("doc create: %w", err)
 	}
-	return s.DocGet(id)
+	return s.DocGet(projectID, id)
 }
 
-func (s *Store) DocUpdate(id string, title, body *string, tags []string, category *string, author string) (*Document, error) {
+func (s *Store) DocUpdate(projectID, id string, title, body *string, tags []string, category *string, author string) (*Document, error) {
+	projectID = normalizeProjectID(projectID)
 	var sets []string
 	var args []any
 	now := time.Now().Unix()
@@ -336,8 +462,7 @@ func (s *Store) DocUpdate(id string, title, body *string, tags []string, categor
 		args = append(args, *title)
 	}
 	if body != nil {
-		// Recompute line authors
-		prev, _ := s.DocGet(id)
+		prev, _ := s.DocGet(projectID, id)
 		var prevBody string
 		var prevAuthors []string
 		if prev != nil {
@@ -360,14 +485,14 @@ func (s *Store) DocUpdate(id string, title, body *string, tags []string, categor
 	}
 
 	if len(sets) == 0 {
-		return s.DocGet(id)
+		return s.DocGet(projectID, id)
 	}
 
 	sets = append(sets, "updated_at = ?", "updated_by = ?")
 	args = append(args, now, author)
-	args = append(args, id)
+	args = append(args, id, projectID)
 
-	query := fmt.Sprintf(`UPDATE context_docs SET %s WHERE id = ?`, strings.Join(sets, ", "))
+	query := fmt.Sprintf(`UPDATE context_docs SET %s WHERE id = ? AND project_id = ?`, strings.Join(sets, ", "))
 	res, err := s.db.Exec(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("doc update: %w", err)
@@ -376,11 +501,12 @@ func (s *Store) DocUpdate(id string, title, body *string, tags []string, categor
 	if n == 0 {
 		return nil, fmt.Errorf("document not found: %s", id)
 	}
-	return s.DocGet(id)
+	return s.DocGet(projectID, id)
 }
 
-func (s *Store) DocDelete(id string) error {
-	res, err := s.db.Exec(`DELETE FROM context_docs WHERE id = ?`, id)
+func (s *Store) DocDelete(projectID, id string) error {
+	projectID = normalizeProjectID(projectID)
+	res, err := s.db.Exec(`DELETE FROM context_docs WHERE id = ? AND project_id = ?`, id, projectID)
 	if err != nil {
 		return fmt.Errorf("doc delete: %w", err)
 	}
@@ -391,17 +517,18 @@ func (s *Store) DocDelete(id string) error {
 	return nil
 }
 
-func (s *Store) DocList(category, tag string, limit, offset int) ([]Document, error) {
-	query := `SELECT id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at FROM context_docs WHERE 1=1`
-	var args []any
+func (s *Store) DocList(projectID, category, tag string, limit, offset int) ([]Document, error) {
+	projectID = normalizeProjectID(projectID)
+	query := `SELECT id, project_id, title, body, category, tags, created_by, updated_by, line_authors, created_at, updated_at
+	          FROM context_docs WHERE project_id = ?`
+	args := []any{projectID}
 	if category != "" {
 		query += ` AND category = ?`
 		args = append(args, category)
 	}
 	if tag != "" {
-		query += ` AND json_each.value = ?`
-		query = strings.Replace(query, "FROM context_docs", "FROM context_docs, json_each(context_docs.tags)", 1)
-		args = append(args, tag)
+		query += ` AND id IN (SELECT context_docs.id FROM context_docs, json_each(context_docs.tags) WHERE context_docs.project_id = ? AND json_each.value = ?)`
+		args = append(args, projectID, tag)
 	}
 	query += ` ORDER BY updated_at DESC`
 	if limit > 0 {
@@ -428,14 +555,15 @@ func (s *Store) DocList(category, tag string, limit, offset int) ([]Document, er
 	return docs, rows.Err()
 }
 
-func (s *Store) DocSearch(query string) ([]Document, error) {
+func (s *Store) DocSearch(projectID, query string) ([]Document, error) {
+	projectID = normalizeProjectID(projectID)
 	rows, err := s.db.Query(
-		`SELECT d.id, d.title, d.body, d.category, d.tags, d.created_by, d.updated_by, d.line_authors, d.created_at, d.updated_at
+		`SELECT d.id, d.project_id, d.title, d.body, d.category, d.tags, d.created_by, d.updated_by, d.line_authors, d.created_at, d.updated_at
 		 FROM context_docs d
 		 JOIN context_docs_fts fts ON d.rowid = fts.rowid
-		 WHERE context_docs_fts MATCH ?
+		 WHERE context_docs_fts MATCH ? AND d.project_id = ?
 		 ORDER BY rank
-		 LIMIT 50`, query)
+		 LIMIT 50`, query, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("doc search: %w", err)
 	}
@@ -455,7 +583,7 @@ func (s *Store) DocSearch(query string) ([]Document, error) {
 func scanDocument(row *sql.Row) (*Document, error) {
 	var d Document
 	var tagsJSON, lineAuthorsJSON string
-	err := row.Scan(&d.ID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &lineAuthorsJSON, &d.CreatedAt, &d.UpdatedAt)
+	err := row.Scan(&d.ID, &d.ProjectID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &lineAuthorsJSON, &d.CreatedAt, &d.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -476,7 +604,7 @@ func scanDocument(row *sql.Row) (*Document, error) {
 func scanDocumentFromRows(rows *sql.Rows) (*Document, error) {
 	var d Document
 	var tagsJSON, lineAuthorsJSON string
-	err := rows.Scan(&d.ID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &lineAuthorsJSON, &d.CreatedAt, &d.UpdatedAt)
+	err := rows.Scan(&d.ID, &d.ProjectID, &d.Title, &d.Body, &d.Category, &tagsJSON, &d.CreatedBy, &d.UpdatedBy, &lineAuthorsJSON, &d.CreatedAt, &d.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("scan doc row: %w", err)
 	}
@@ -495,6 +623,7 @@ func scanDocumentFromRows(rows *sql.Rows) (*Document, error) {
 
 type Entity struct {
 	ID         string         `json:"id"`
+	ProjectID  string         `json:"project_id"`
 	Type       string         `json:"type"`
 	Name       string         `json:"name"`
 	Properties map[string]any `json:"properties"`
@@ -504,28 +633,31 @@ type Entity struct {
 	UpdatedAt  int64          `json:"updated_at"`
 }
 
-func (s *Store) EntityGet(id string) (*Entity, error) {
+func (s *Store) EntityGet(projectID, id string) (*Entity, error) {
+	projectID = normalizeProjectID(projectID)
 	row := s.db.QueryRow(
-		`SELECT id, type, name, properties, created_by, updated_by, created_at, updated_at
-		 FROM context_entities WHERE id = ?`, id)
+		`SELECT id, project_id, type, name, properties, created_by, updated_by, created_at, updated_at
+		 FROM context_entities WHERE id = ? AND project_id = ?`, id, projectID)
 	return scanEntity(row)
 }
 
-func (s *Store) EntityCreate(entityType, name string, properties map[string]any, author string) (*Entity, error) {
+func (s *Store) EntityCreate(projectID, entityType, name string, properties map[string]any, author string) (*Entity, error) {
+	projectID = normalizeProjectID(projectID)
 	id := uuid.New().String()
 	propsJSON, _ := json.Marshal(properties)
 	now := time.Now().Unix()
 	_, err := s.db.Exec(
-		`INSERT INTO context_entities (id, type, name, properties, created_by, updated_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, entityType, name, string(propsJSON), author, author, now, now)
+		`INSERT INTO context_entities (id, project_id, type, name, properties, created_by, updated_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, projectID, entityType, name, string(propsJSON), author, author, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("entity create: %w", err)
 	}
-	return s.EntityGet(id)
+	return s.EntityGet(projectID, id)
 }
 
-func (s *Store) EntityUpdate(id string, name *string, properties map[string]any, author string) (*Entity, error) {
+func (s *Store) EntityUpdate(projectID, id string, name *string, properties map[string]any, author string) (*Entity, error) {
+	projectID = normalizeProjectID(projectID)
 	var sets []string
 	var args []any
 	now := time.Now().Unix()
@@ -541,14 +673,14 @@ func (s *Store) EntityUpdate(id string, name *string, properties map[string]any,
 	}
 
 	if len(sets) == 0 {
-		return s.EntityGet(id)
+		return s.EntityGet(projectID, id)
 	}
 
 	sets = append(sets, "updated_at = ?", "updated_by = ?")
 	args = append(args, now, author)
-	args = append(args, id)
+	args = append(args, id, projectID)
 
-	query := fmt.Sprintf(`UPDATE context_entities SET %s WHERE id = ?`, strings.Join(sets, ", "))
+	query := fmt.Sprintf(`UPDATE context_entities SET %s WHERE id = ? AND project_id = ?`, strings.Join(sets, ", "))
 	res, err := s.db.Exec(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("entity update: %w", err)
@@ -557,11 +689,12 @@ func (s *Store) EntityUpdate(id string, name *string, properties map[string]any,
 	if n == 0 {
 		return nil, fmt.Errorf("entity not found: %s", id)
 	}
-	return s.EntityGet(id)
+	return s.EntityGet(projectID, id)
 }
 
-func (s *Store) EntityDelete(id string) error {
-	res, err := s.db.Exec(`DELETE FROM context_entities WHERE id = ?`, id)
+func (s *Store) EntityDelete(projectID, id string) error {
+	projectID = normalizeProjectID(projectID)
+	res, err := s.db.Exec(`DELETE FROM context_entities WHERE id = ? AND project_id = ?`, id, projectID)
 	if err != nil {
 		return fmt.Errorf("entity delete: %w", err)
 	}
@@ -572,9 +705,11 @@ func (s *Store) EntityDelete(id string) error {
 	return nil
 }
 
-func (s *Store) EntityList(entityType string, limit int) ([]Entity, error) {
-	query := `SELECT id, type, name, properties, created_by, updated_by, created_at, updated_at FROM context_entities WHERE 1=1`
-	var args []any
+func (s *Store) EntityList(projectID, entityType string, limit int) ([]Entity, error) {
+	projectID = normalizeProjectID(projectID)
+	query := `SELECT id, project_id, type, name, properties, created_by, updated_by, created_at, updated_at
+	          FROM context_entities WHERE project_id = ?`
+	args := []any{projectID}
 	if entityType != "" {
 		query += ` AND type = ?`
 		args = append(args, entityType)
@@ -604,7 +739,7 @@ func (s *Store) EntityList(entityType string, limit int) ([]Entity, error) {
 func scanEntity(row *sql.Row) (*Entity, error) {
 	var e Entity
 	var propsJSON string
-	err := row.Scan(&e.ID, &e.Type, &e.Name, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
+	err := row.Scan(&e.ID, &e.ProjectID, &e.Type, &e.Name, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -621,7 +756,7 @@ func scanEntity(row *sql.Row) (*Entity, error) {
 func scanEntityFromRows(rows *sql.Rows) (*Entity, error) {
 	var e Entity
 	var propsJSON string
-	err := rows.Scan(&e.ID, &e.Type, &e.Name, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
+	err := rows.Scan(&e.ID, &e.ProjectID, &e.Type, &e.Name, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("scan entity row: %w", err)
 	}
@@ -636,6 +771,7 @@ func scanEntityFromRows(rows *sql.Rows) (*Entity, error) {
 
 type Edge struct {
 	ID         string         `json:"id"`
+	ProjectID  string         `json:"project_id"`
 	SourceID   string         `json:"source_id"`
 	TargetID   string         `json:"target_id"`
 	Relation   string         `json:"relation"`
@@ -646,22 +782,24 @@ type Edge struct {
 	UpdatedAt  int64          `json:"updated_at"`
 }
 
-func (s *Store) EdgeCreate(sourceID, targetID, relation string, properties map[string]any, author string) (*Edge, error) {
+func (s *Store) EdgeCreate(projectID, sourceID, targetID, relation string, properties map[string]any, author string) (*Edge, error) {
+	projectID = normalizeProjectID(projectID)
 	id := uuid.New().String()
 	propsJSON, _ := json.Marshal(properties)
 	now := time.Now().Unix()
 	_, err := s.db.Exec(
-		`INSERT INTO context_edges (id, source_id, target_id, relation, properties, created_by, updated_by, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, sourceID, targetID, relation, string(propsJSON), author, author, now, now)
+		`INSERT INTO context_edges (id, project_id, source_id, target_id, relation, properties, created_by, updated_by, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, projectID, sourceID, targetID, relation, string(propsJSON), author, author, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("edge create: %w", err)
 	}
-	return s.edgeGet(id)
+	return s.edgeGet(projectID, id)
 }
 
-func (s *Store) EdgeDelete(id string) error {
-	res, err := s.db.Exec(`DELETE FROM context_edges WHERE id = ?`, id)
+func (s *Store) EdgeDelete(projectID, id string) error {
+	projectID = normalizeProjectID(projectID)
+	res, err := s.db.Exec(`DELETE FROM context_edges WHERE id = ? AND project_id = ?`, id, projectID)
 	if err != nil {
 		return fmt.Errorf("edge delete: %w", err)
 	}
@@ -672,9 +810,11 @@ func (s *Store) EdgeDelete(id string) error {
 	return nil
 }
 
-func (s *Store) EdgeList(entityID, relation, direction string) ([]Edge, error) {
-	query := `SELECT id, source_id, target_id, relation, properties, created_by, updated_by, created_at, updated_at FROM context_edges WHERE 1=1`
-	var args []any
+func (s *Store) EdgeList(projectID, entityID, relation, direction string) ([]Edge, error) {
+	projectID = normalizeProjectID(projectID)
+	query := `SELECT id, project_id, source_id, target_id, relation, properties, created_by, updated_by, created_at, updated_at
+	          FROM context_edges WHERE project_id = ?`
+	args := []any{projectID}
 
 	if entityID != "" {
 		switch direction {
@@ -705,7 +845,7 @@ func (s *Store) EdgeList(entityID, relation, direction string) ([]Edge, error) {
 	for rows.Next() {
 		var e Edge
 		var propsJSON string
-		if err := rows.Scan(&e.ID, &e.SourceID, &e.TargetID, &e.Relation, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.ProjectID, &e.SourceID, &e.TargetID, &e.Relation, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan edge: %w", err)
 		}
 		_ = json.Unmarshal([]byte(propsJSON), &e.Properties)
@@ -717,13 +857,14 @@ func (s *Store) EdgeList(entityID, relation, direction string) ([]Edge, error) {
 	return edges, rows.Err()
 }
 
-func (s *Store) edgeGet(id string) (*Edge, error) {
+func (s *Store) edgeGet(projectID, id string) (*Edge, error) {
+	projectID = normalizeProjectID(projectID)
 	var e Edge
 	var propsJSON string
 	err := s.db.QueryRow(
-		`SELECT id, source_id, target_id, relation, properties, created_by, updated_by, created_at, updated_at
-		 FROM context_edges WHERE id = ?`, id).
-		Scan(&e.ID, &e.SourceID, &e.TargetID, &e.Relation, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
+		`SELECT id, project_id, source_id, target_id, relation, properties, created_by, updated_by, created_at, updated_at
+		 FROM context_edges WHERE id = ? AND project_id = ?`, id, projectID).
+		Scan(&e.ID, &e.ProjectID, &e.SourceID, &e.TargetID, &e.Relation, &propsJSON, &e.CreatedBy, &e.UpdatedBy, &e.CreatedAt, &e.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

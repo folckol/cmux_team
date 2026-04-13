@@ -12,15 +12,16 @@ type SearchResult struct {
 }
 
 // UnifiedSearch searches across KV entries, documents (FTS5), and entities.
-func (s *Store) UnifiedSearch(query string) ([]SearchResult, error) {
+func (s *Store) UnifiedSearch(projectID, query string) ([]SearchResult, error) {
+	projectID = normalizeProjectID(projectID)
 	var results []SearchResult
 
 	// Search KV by key and value
 	kvRows, err := s.db.Query(
 		`SELECT key, value, category FROM context_kv
-		 WHERE key LIKE ? OR value LIKE ?
+		 WHERE project_id = ? AND (key LIKE ? OR value LIKE ?)
 		 LIMIT 20`,
-		"%"+query+"%", "%"+query+"%")
+		projectID, "%"+query+"%", "%"+query+"%")
 	if err == nil {
 		defer kvRows.Close()
 		for kvRows.Next() {
@@ -41,14 +42,14 @@ func (s *Store) UnifiedSearch(query string) ([]SearchResult, error) {
 		}
 	}
 
-	// Search documents via FTS5
+	// Search documents via FTS5 (filter by project via join)
 	docRows, err := s.db.Query(
 		`SELECT d.id, d.title, snippet(context_docs_fts, 1, '<mark>', '</mark>', '...', 32)
 		 FROM context_docs d
 		 JOIN context_docs_fts fts ON d.rowid = fts.rowid
-		 WHERE context_docs_fts MATCH ?
+		 WHERE context_docs_fts MATCH ? AND d.project_id = ?
 		 ORDER BY rank
-		 LIMIT 20`, query)
+		 LIMIT 20`, query, projectID)
 	if err == nil {
 		defer docRows.Close()
 		for docRows.Next() {
@@ -68,9 +69,9 @@ func (s *Store) UnifiedSearch(query string) ([]SearchResult, error) {
 	// Search entities by name
 	entityRows, err := s.db.Query(
 		`SELECT id, type, name FROM context_entities
-		 WHERE name LIKE ?
+		 WHERE project_id = ? AND name LIKE ?
 		 LIMIT 20`,
-		"%"+query+"%")
+		projectID, "%"+query+"%")
 	if err == nil {
 		defer entityRows.Close()
 		for entityRows.Next() {
@@ -90,36 +91,39 @@ func (s *Store) UnifiedSearch(query string) ([]SearchResult, error) {
 	return results, nil
 }
 
-// Export dumps all data as a single JSON-serializable structure.
-func (s *Store) Export() (map[string]any, error) {
-	kvEntries, err := s.KVList("", "")
+// Export dumps a single project's data as a JSON-serializable structure.
+func (s *Store) Export(projectID string) (map[string]any, error) {
+	projectID = normalizeProjectID(projectID)
+	kvEntries, err := s.KVList(projectID, "", "")
 	if err != nil {
 		return nil, err
 	}
-	docs, err := s.DocList("", "", 0, 0)
+	docs, err := s.DocList(projectID, "", "", 0, 0)
 	if err != nil {
 		return nil, err
 	}
-	entities, err := s.EntityList("", 0)
+	entities, err := s.EntityList(projectID, "", 0)
 	if err != nil {
 		return nil, err
 	}
-	edges, err := s.EdgeList("", "", "")
+	edges, err := s.EdgeList(projectID, "", "", "")
 	if err != nil {
 		return nil, err
 	}
 
 	return map[string]any{
-		"version":  1,
-		"kv":       kvEntries,
-		"docs":     docs,
-		"entities": entities,
-		"edges":    edges,
+		"version":    2,
+		"project_id": projectID,
+		"kv":         kvEntries,
+		"docs":       docs,
+		"entities":   entities,
+		"edges":      edges,
 	}, nil
 }
 
-// Import loads data from an exported JSON structure.
-func (s *Store) Import(data map[string]any) (map[string]int, error) {
+// Import loads data from an exported JSON structure into the given project.
+func (s *Store) Import(projectID string, data map[string]any) (map[string]int, error) {
+	projectID = normalizeProjectID(projectID)
 	counts := map[string]int{"kv": 0, "docs": 0, "entities": 0, "edges": 0}
 
 	tx, err := s.db.Begin()
@@ -128,7 +132,6 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 	}
 	defer tx.Rollback()
 
-	// Import KV entries
 	if raw, ok := data["kv"]; ok {
 		if items, ok := raw.([]any); ok {
 			for _, item := range items {
@@ -141,8 +144,13 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 				category, _ := m["category"].(string)
 				if key != "" {
 					_, err := tx.Exec(
-						`INSERT OR REPLACE INTO context_kv (key, value, category, updated_at)
-						 VALUES (?, ?, ?, unixepoch())`, key, value, category)
+						`INSERT INTO context_kv (project_id, key, value, category, updated_at)
+						 VALUES (?, ?, ?, ?, unixepoch())
+						 ON CONFLICT(project_id, key) DO UPDATE SET
+							value = excluded.value,
+							category = excluded.category,
+							updated_at = excluded.updated_at`,
+						projectID, key, value, category)
 					if err == nil {
 						counts["kv"]++
 					}
@@ -151,7 +159,6 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 		}
 	}
 
-	// Import documents
 	if raw, ok := data["docs"]; ok {
 		if items, ok := raw.([]any); ok {
 			for _, item := range items {
@@ -165,8 +172,9 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 				category, _ := m["category"].(string)
 				if id != "" && title != "" {
 					_, err := tx.Exec(
-						`INSERT OR REPLACE INTO context_docs (id, title, body, category, updated_at)
-						 VALUES (?, ?, ?, ?, unixepoch())`, id, title, body, category)
+						`INSERT OR REPLACE INTO context_docs (id, project_id, title, body, category, updated_at)
+						 VALUES (?, ?, ?, ?, ?, unixepoch())`,
+						id, projectID, title, body, category)
 					if err == nil {
 						counts["docs"]++
 					}
@@ -175,7 +183,6 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 		}
 	}
 
-	// Import entities
 	if raw, ok := data["entities"]; ok {
 		if items, ok := raw.([]any); ok {
 			for _, item := range items {
@@ -194,8 +201,9 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 				}
 				if id != "" && name != "" {
 					_, err := tx.Exec(
-						`INSERT OR REPLACE INTO context_entities (id, type, name, properties, updated_at)
-						 VALUES (?, ?, ?, ?, unixepoch())`, id, entityType, name, propsJSON)
+						`INSERT OR REPLACE INTO context_entities (id, project_id, type, name, properties, updated_at)
+						 VALUES (?, ?, ?, ?, ?, unixepoch())`,
+						id, projectID, entityType, name, propsJSON)
 					if err == nil {
 						counts["entities"]++
 					}
@@ -204,7 +212,6 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 		}
 	}
 
-	// Import edges
 	if raw, ok := data["edges"]; ok {
 		if items, ok := raw.([]any); ok {
 			for _, item := range items {
@@ -224,8 +231,9 @@ func (s *Store) Import(data map[string]any) (map[string]int, error) {
 				}
 				if id != "" && sourceID != "" && targetID != "" {
 					_, err := tx.Exec(
-						`INSERT OR REPLACE INTO context_edges (id, source_id, target_id, relation, properties, updated_at)
-						 VALUES (?, ?, ?, ?, ?, unixepoch())`, id, sourceID, targetID, relation, propsJSON)
+						`INSERT OR REPLACE INTO context_edges (id, project_id, source_id, target_id, relation, properties, updated_at)
+						 VALUES (?, ?, ?, ?, ?, ?, unixepoch())`,
+						id, projectID, sourceID, targetID, relation, propsJSON)
 					if err == nil {
 						counts["edges"]++
 					}

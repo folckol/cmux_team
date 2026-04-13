@@ -10,6 +10,7 @@ MAX_SIZE="${CMUX_CONTEXT_MAX_INJECT_SIZE:-4096}"
 PROJECT_ROOT="${CMUX_PROJECT_ROOT:-$PWD}"
 ME_FILE="$PROJECT_ROOT/.cmux_team/me.json"
 PROMPT_FILE="$PROJECT_ROOT/.cmux_team/system_prompt.md"
+CONN_FILE="$PROJECT_ROOT/.cmux_team/connection.json"
 
 # Check if daemon is running
 if [ ! -S "$SOCKET_PATH" ]; then
@@ -22,11 +23,42 @@ if [ -f "$ME_FILE" ]; then
     ME_JSON=$(cat "$ME_FILE" 2>/dev/null || echo "")
 fi
 
-# Helper: send RPC and extract result
+# Resolve active team-context project:
+# CMUX_CONTEXT_PROJECT env > connection.json project_id > empty (daemon uses default)
+PROJECT_ID="${CMUX_CONTEXT_PROJECT:-}"
+if [ -z "$PROJECT_ID" ] && [ -f "$CONN_FILE" ]; then
+    PROJECT_ID=$(python3 -c "
+import sys, json
+try:
+    with open('$CONN_FILE') as f: d = json.load(f)
+    print(d.get('project_id', ''))
+except Exception:
+    pass
+" 2>/dev/null)
+fi
+
+# Helper: send RPC and extract result; auto-injects project_id into params
+# (unless params already provides one). Skips injection for scopeless methods.
 rpc_call() {
     local method="$1"
     local params="$2"
-    echo "{\"id\":1,\"method\":\"$method\",\"params\":$params}" | \
+    local final_params
+    final_params=$(PROJECT_ID="$PROJECT_ID" METHOD="$method" PARAMS="$params" python3 -c "
+import os, json, sys
+method = os.environ['METHOD']
+pid = os.environ.get('PROJECT_ID', '')
+scopeless = {'auth','ping','hello',
+             'context.project.list','context.project.create','context.project.rename','context.project.delete',
+             'context.user.list','context.user.create','context.user.get','context.user.delete'}
+try:
+    p = json.loads(os.environ['PARAMS']) if os.environ['PARAMS'] else {}
+except Exception:
+    p = {}
+if pid and method not in scopeless and 'project_id' not in p:
+    p['project_id'] = pid
+sys.stdout.write(json.dumps(p))
+" 2>/dev/null)
+    echo "{\"id\":1,\"method\":\"$method\",\"params\":$final_params}" | \
         nc -U "$SOCKET_PATH" 2>/dev/null | \
         python3 -c "
 import sys, json

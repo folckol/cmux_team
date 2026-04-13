@@ -32,10 +32,13 @@ func setupTestDB(t *testing.T) (*sql.DB, *Store) {
 	return db, NewStore(db)
 }
 
+// p is the default test project (empty = DefaultProjectID via normalization).
+const p = ""
+
 func TestKVSetAndGet(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	entry, err := store.KVSet("api_url", "https://api.example.com", "env", []string{"backend"}, "alice")
+	entry, err := store.KVSet(p, "api_url", "https://api.example.com", "env", []string{"backend"}, "alice")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +46,7 @@ func TestKVSetAndGet(t *testing.T) {
 		t.Fatalf("unexpected entry: %+v", entry)
 	}
 
-	got, err := store.KVGet("api_url")
+	got, err := store.KVGet(p, "api_url")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,10 +58,10 @@ func TestKVSetAndGet(t *testing.T) {
 func TestKVUpsert(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	store.KVSet("key1", "value1", "", nil, "")
-	store.KVSet("key1", "value2", "updated", nil, "")
+	store.KVSet(p, "key1", "value1", "", nil, "")
+	store.KVSet(p, "key1", "value2", "updated", nil, "")
 
-	got, _ := store.KVGet("key1")
+	got, _ := store.KVGet(p, "key1")
 	if got.Value != "value2" || got.Category != "updated" {
 		t.Fatalf("upsert failed: %+v", got)
 	}
@@ -67,11 +70,11 @@ func TestKVUpsert(t *testing.T) {
 func TestKVList(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	store.KVSet("env.staging", "s", "env", nil, "")
-	store.KVSet("env.prod", "p", "env", nil, "")
-	store.KVSet("flag.beta", "true", "flags", nil, "")
+	store.KVSet(p, "env.staging", "s", "env", nil, "")
+	store.KVSet(p, "env.prod", "p", "env", nil, "")
+	store.KVSet(p, "flag.beta", "true", "flags", nil, "")
 
-	entries, err := store.KVList("env", "")
+	entries, err := store.KVList(p, "env", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +82,7 @@ func TestKVList(t *testing.T) {
 		t.Fatalf("expected 2 env entries, got %d", len(entries))
 	}
 
-	entries, _ = store.KVList("", "env.")
+	entries, _ = store.KVList(p, "", "env.")
 	if len(entries) != 2 {
 		t.Fatalf("expected 2 prefix entries, got %d", len(entries))
 	}
@@ -88,11 +91,11 @@ func TestKVList(t *testing.T) {
 func TestKVDelete(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	store.KVSet("tmp", "val", "", nil, "")
-	if err := store.KVDelete("tmp"); err != nil {
+	store.KVSet(p, "tmp", "val", "", nil, "")
+	if err := store.KVDelete(p, "tmp"); err != nil {
 		t.Fatal(err)
 	}
-	got, _ := store.KVGet("tmp")
+	got, _ := store.KVGet(p, "tmp")
 	if got != nil {
 		t.Fatal("expected nil after delete")
 	}
@@ -101,7 +104,7 @@ func TestKVDelete(t *testing.T) {
 func TestDocCreateAndSearch(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	doc, err := store.DocCreate("Auth Flow", "The authentication uses JWT tokens with refresh rotation.", "auth", []string{"security"}, "bob")
+	doc, err := store.DocCreate(p, "Auth Flow", "The authentication uses JWT tokens with refresh rotation.", "auth", []string{"security"}, "bob")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +112,7 @@ func TestDocCreateAndSearch(t *testing.T) {
 		t.Fatalf("unexpected doc: %+v", doc)
 	}
 
-	results, err := store.DocSearch("JWT tokens")
+	results, err := store.DocSearch(p, "JWT tokens")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,10 +124,10 @@ func TestDocCreateAndSearch(t *testing.T) {
 func TestDocUpdate(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	doc, _ := store.DocCreate("Draft", "initial body", "", nil, "")
+	doc, _ := store.DocCreate(p, "Draft", "initial body", "", nil, "")
 	newTitle := "Final"
 	newBody := "updated body"
-	updated, err := store.DocUpdate(doc.ID, &newTitle, &newBody, nil, nil, "")
+	updated, err := store.DocUpdate(p, doc.ID, &newTitle, &newBody, nil, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,11 +139,11 @@ func TestDocUpdate(t *testing.T) {
 func TestDocList(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	store.DocCreate("Doc A", "", "arch", nil, "")
-	store.DocCreate("Doc B", "", "arch", nil, "")
-	store.DocCreate("Doc C", "", "ops", nil, "")
+	store.DocCreate(p, "Doc A", "", "arch", nil, "")
+	store.DocCreate(p, "Doc B", "", "arch", nil, "")
+	store.DocCreate(p, "Doc C", "", "ops", nil, "")
 
-	docs, _ := store.DocList("arch", "", 0, 0)
+	docs, _ := store.DocList(p, "arch", "", 0, 0)
 	if len(docs) != 2 {
 		t.Fatalf("expected 2, got %d", len(docs))
 	}
@@ -149,7 +152,7 @@ func TestDocList(t *testing.T) {
 func TestEntityCreateAndList(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	e1, err := store.EntityCreate("service", "api-gateway", map[string]any{"port": 8080}, "")
+	e1, err := store.EntityCreate(p, "service", "api-gateway", map[string]any{"port": 8080}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,15 +160,15 @@ func TestEntityCreateAndList(t *testing.T) {
 		t.Fatalf("unexpected: %+v", e1)
 	}
 
-	store.EntityCreate("service", "auth-svc", nil, "")
-	store.EntityCreate("person", "Alice", nil, "")
+	store.EntityCreate(p, "service", "auth-svc", nil, "")
+	store.EntityCreate(p, "person", "Alice", nil, "")
 
-	services, _ := store.EntityList("service", 0)
+	services, _ := store.EntityList(p, "service", 0)
 	if len(services) != 2 {
 		t.Fatalf("expected 2 services, got %d", len(services))
 	}
 
-	all, _ := store.EntityList("", 0)
+	all, _ := store.EntityList(p, "", 0)
 	if len(all) != 3 {
 		t.Fatalf("expected 3 total, got %d", len(all))
 	}
@@ -174,10 +177,10 @@ func TestEntityCreateAndList(t *testing.T) {
 func TestEdgeCreateAndList(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	e1, _ := store.EntityCreate("service", "gateway", nil, "")
-	e2, _ := store.EntityCreate("service", "auth", nil, "")
+	e1, _ := store.EntityCreate(p, "service", "gateway", nil, "")
+	e2, _ := store.EntityCreate(p, "service", "auth", nil, "")
 
-	edge, err := store.EdgeCreate(e1.ID, e2.ID, "depends_on", map[string]any{"protocol": "gRPC"}, "")
+	edge, err := store.EdgeCreate(p, e1.ID, e2.ID, "depends_on", map[string]any{"protocol": "gRPC"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,12 +188,12 @@ func TestEdgeCreateAndList(t *testing.T) {
 		t.Fatalf("unexpected edge: %+v", edge)
 	}
 
-	edges, _ := store.EdgeList(e1.ID, "", "outgoing")
+	edges, _ := store.EdgeList(p, e1.ID, "", "outgoing")
 	if len(edges) != 1 {
 		t.Fatalf("expected 1 outgoing edge, got %d", len(edges))
 	}
 
-	edges, _ = store.EdgeList(e2.ID, "", "incoming")
+	edges, _ = store.EdgeList(p, e2.ID, "", "incoming")
 	if len(edges) != 1 {
 		t.Fatalf("expected 1 incoming edge, got %d", len(edges))
 	}
@@ -199,13 +202,13 @@ func TestEdgeCreateAndList(t *testing.T) {
 func TestEdgeCascadeDelete(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	e1, _ := store.EntityCreate("service", "a", nil, "")
-	e2, _ := store.EntityCreate("service", "b", nil, "")
-	store.EdgeCreate(e1.ID, e2.ID, "uses", nil, "")
+	e1, _ := store.EntityCreate(p, "service", "a", nil, "")
+	e2, _ := store.EntityCreate(p, "service", "b", nil, "")
+	store.EdgeCreate(p, e1.ID, e2.ID, "uses", nil, "")
 
 	// Delete entity should cascade delete edges
-	store.EntityDelete(e1.ID)
-	edges, _ := store.EdgeList(e1.ID, "", "")
+	store.EntityDelete(p, e1.ID)
+	edges, _ := store.EdgeList(p, e1.ID, "", "")
 	if len(edges) != 0 {
 		t.Fatalf("expected 0 edges after cascade, got %d", len(edges))
 	}
@@ -214,11 +217,11 @@ func TestEdgeCascadeDelete(t *testing.T) {
 func TestUnifiedSearch(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	store.KVSet("staging_url", "https://staging.test.com", "env", nil, "")
-	store.DocCreate("Staging Guide", "How to deploy to staging environment", "", nil, "")
-	store.EntityCreate("service", "staging-proxy", nil, "")
+	store.KVSet(p, "staging_url", "https://staging.test.com", "env", nil, "")
+	store.DocCreate(p, "Staging Guide", "How to deploy to staging environment", "", nil, "")
+	store.EntityCreate(p, "service", "staging-proxy", nil, "")
 
-	results, err := store.UnifiedSearch("staging")
+	results, err := store.UnifiedSearch(p, "staging")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,13 +233,13 @@ func TestUnifiedSearch(t *testing.T) {
 func TestExportImport(t *testing.T) {
 	_, store := setupTestDB(t)
 
-	store.KVSet("k1", "v1", "", nil, "")
-	store.DocCreate("Doc1", "body1", "", nil, "")
-	e1, _ := store.EntityCreate("service", "svc1", nil, "")
-	e2, _ := store.EntityCreate("service", "svc2", nil, "")
-	store.EdgeCreate(e1.ID, e2.ID, "calls", nil, "")
+	store.KVSet(p, "k1", "v1", "", nil, "")
+	store.DocCreate(p, "Doc1", "body1", "", nil, "")
+	e1, _ := store.EntityCreate(p, "service", "svc1", nil, "")
+	e2, _ := store.EntityCreate(p, "service", "svc2", nil, "")
+	store.EdgeCreate(p, e1.ID, e2.ID, "calls", nil, "")
 
-	exported, err := store.Export()
+	exported, err := store.Export(p)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,11 +256,36 @@ func TestExportImport(t *testing.T) {
 
 	// Import into fresh store
 	_, store2 := setupTestDB(t)
-	counts, err := store2.Import(roundtripped)
+	counts, err := store2.Import(p, roundtripped)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if counts["kv"] != 1 || counts["docs"] != 1 || counts["entities"] != 2 || counts["edges"] != 1 {
 		t.Fatalf("unexpected import counts: %+v", counts)
+	}
+}
+
+// TestProjectIsolation verifies the same key can coexist across projects.
+func TestProjectIsolation(t *testing.T) {
+	_, store := setupTestDB(t)
+
+	proj, err := store.ProjectCreate("Other", "u")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store.KVSet(p, "shared", "default-val", "", nil, "")
+	store.KVSet(proj.ID, "shared", "other-val", "", nil, "")
+
+	a, _ := store.KVGet(p, "shared")
+	b, _ := store.KVGet(proj.ID, "shared")
+	if a == nil || b == nil || a.Value == b.Value {
+		t.Fatalf("expected isolated values, got a=%+v b=%+v", a, b)
+	}
+
+	aList, _ := store.KVList(p, "", "")
+	bList, _ := store.KVList(proj.ID, "", "")
+	if len(aList) != 1 || len(bList) != 1 {
+		t.Fatalf("expected 1 entry each project, got default=%d other=%d", len(aList), len(bList))
 	}
 }

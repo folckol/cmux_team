@@ -5,7 +5,12 @@ import (
 	"fmt"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
+
+// DefaultProjectID is the id assigned to data that existed before the
+// multi-project schema (v4). New clients that don't specify a project also
+// land here so the daemon stays backward-compatible.
+const DefaultProjectID = "default"
 
 func initSchema(db *sql.DB) error {
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
@@ -43,6 +48,11 @@ func initSchema(db *sql.DB) error {
 	if currentVersion < 3 {
 		if err := migrateV3(tx); err != nil {
 			return fmt.Errorf("migrate v3: %w", err)
+		}
+	}
+	if currentVersion < 4 {
+		if err := migrateV4(tx); err != nil {
+			return fmt.Errorf("migrate v4: %w", err)
 		}
 	}
 
@@ -175,6 +185,66 @@ func migrateV3(tx *sql.Tx) error {
 	stmts := []string{
 		`ALTER TABLE context_docs ADD COLUMN line_authors TEXT NOT NULL DEFAULT '[]'`,
 	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", stmt[:min(len(stmt), 60)], err)
+		}
+	}
+	return nil
+}
+
+// migrateV4 introduces multi-project support. A `context_projects` table
+// is created; every data table gets a `project_id` column (default
+// DefaultProjectID so existing rows are preserved). KV needs a composite
+// PK, so the table is rebuilt via a rename+copy.
+func migrateV4(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS context_projects (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL UNIQUE,
+			created_by TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL DEFAULT (unixepoch())
+		)`,
+
+		// Seed default project so old rows remain queryable.
+		`INSERT OR IGNORE INTO context_projects (id, name, created_at) VALUES ('default', 'Default', unixepoch())`,
+
+		// Docs / entities / edges / events: single-column add, PK stays (UUID / auto id).
+		`ALTER TABLE context_docs     ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'`,
+		`ALTER TABLE context_entities ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'`,
+		`ALTER TABLE context_edges    ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'`,
+		`ALTER TABLE context_events   ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default'`,
+
+		`CREATE INDEX IF NOT EXISTS idx_docs_project     ON context_docs(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_entities_project ON context_entities(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_edges_project    ON context_edges(project_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_events_project   ON context_events(project_id)`,
+
+		// KV: key was PK, but it must be unique only per-project now.
+		// Rebuild the table with (project_id, key) composite PK.
+		`ALTER TABLE context_kv RENAME TO context_kv_old_v3`,
+
+		`CREATE TABLE context_kv (
+			project_id TEXT NOT NULL DEFAULT 'default',
+			key        TEXT NOT NULL,
+			value      TEXT NOT NULL,
+			category   TEXT NOT NULL DEFAULT '',
+			tags       TEXT NOT NULL DEFAULT '[]',
+			created_by TEXT NOT NULL DEFAULT '',
+			updated_by TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+			updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+			PRIMARY KEY (project_id, key)
+		)`,
+
+		`INSERT INTO context_kv (project_id, key, value, category, tags, created_by, updated_by, created_at, updated_at)
+		 SELECT 'default', key, value, category, tags, created_by, updated_by, created_at, updated_at FROM context_kv_old_v3`,
+
+		`DROP TABLE context_kv_old_v3`,
+
+		`CREATE INDEX IF NOT EXISTS idx_kv_project_category ON context_kv(project_id, category)`,
+	}
+
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("exec %q: %w", stmt[:min(len(stmt), 60)], err)

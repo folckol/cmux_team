@@ -4,15 +4,32 @@ import Foundation
 /// Connects directly to the context daemon socket for all operations.
 enum ContextCLI {
 
+    /// Active project id for this CLI invocation. Resolved from (in order):
+    /// `--project <id>` flag, `CMUX_CONTEXT_PROJECT` env var, `.cmux_team/connection.json`'s
+    /// `project_id`, else empty (daemon falls back to `default`).
+    nonisolated(unsafe) static var currentProjectId: String = ""
+
     static func run(args: [String]) -> Int32 {
         guard !args.isEmpty else {
             printUsage()
             return 2
         }
 
+        // Strip a possible global --project flag before dispatch.
+        var remaining = args
+        if let pid = extractFlag(args: args, flag: "--project") {
+            currentProjectId = pid
+            remaining = stripFlag(args: args, flag: "--project")
+        } else if let envPid = ProcessInfo.processInfo.environment["CMUX_CONTEXT_PROJECT"], !envPid.isEmpty {
+            currentProjectId = envPid
+        } else {
+            currentProjectId = resolveProjectIdFromConfig()
+        }
+
         let socketPath = resolveSocketPath()
         let _ = resolveAuthor() // warm cache, also ensures me.json is picked up early
 
+        let args = remaining
         switch args[0] {
         case "show":
             return handleShow(socketPath: socketPath)
@@ -120,6 +137,8 @@ enum ContextCLI {
             return handleExport(socketPath: socketPath)
         case "import":
             return handleImport(args: Array(args.dropFirst()), socketPath: socketPath)
+        case "project", "projects":
+            return handleProject(args: Array(args.dropFirst()), socketPath: socketPath)
         case "help", "--help", "-h":
             printUsage()
             return 0
@@ -520,7 +539,30 @@ enum ContextCLI {
         return json["result"] as? [String: Any]
     }
 
+    /// Methods that must not receive the auto-injected project_id.
+    private static func isProjectScopeless(method: String) -> Bool {
+        switch method {
+        case "auth", "ping", "hello",
+             "context.project.list", "context.project.create",
+             "context.project.rename", "context.project.delete",
+             "context.user.list", "context.user.create", "context.user.get", "context.user.delete":
+            return true
+        default: return false
+        }
+    }
+
+    private static func injectProject(_ params: [String: Any], method: String) -> [String: Any] {
+        var p = params
+        if !isProjectScopeless(method: method),
+           p["project_id"] == nil,
+           !currentProjectId.isEmpty {
+            p["project_id"] = currentProjectId
+        }
+        return p
+    }
+
     private static func rpcCallRaw(socketPath: String, method: String, params: [String: Any]) -> Data? {
+        let params = injectProject(params, method: method)
         if let remote = resolveRemoteConfig() {
             return rpcCallTCP(host: remote.host, port: remote.port, token: remote.token, method: method, params: params)
         }
@@ -590,6 +632,150 @@ enum ContextCLI {
               let token = json["token"] as? String, !token.isEmpty
         else { return nil }
         return RemoteCfg(host: host, port: port, token: token)
+    }
+
+    /// Reads `project_id` from `.cmux_team/connection.json`. Returns "" when absent.
+    private static func resolveProjectIdFromConfig() -> String {
+        let cwd = ProcessInfo.processInfo.environment["CMUX_PROJECT_ROOT"]
+            ?? FileManager.default.currentDirectoryPath
+        let url = URL(fileURLWithPath: cwd)
+            .appendingPathComponent(".cmux_team")
+            .appendingPathComponent("connection.json")
+        guard let data = try? Data(contentsOf: url),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let pid = json["project_id"] as? String
+        else { return "" }
+        return pid
+    }
+
+    /// Writes `project_id` back into `.cmux_team/connection.json` so subsequent
+    /// invocations (and the app's ContextPanel) stick to the chosen project.
+    private static func saveProjectIdToConfig(_ projectId: String) -> Bool {
+        let cwd = ProcessInfo.processInfo.environment["CMUX_PROJECT_ROOT"]
+            ?? FileManager.default.currentDirectoryPath
+        let dir = URL(fileURLWithPath: cwd).appendingPathComponent(".cmux_team")
+        let url = dir.appendingPathComponent("connection.json")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var json: [String: Any] = [:]
+        if let data = try? Data(contentsOf: url),
+           let existing = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            json = existing
+        }
+        json["project_id"] = projectId
+        // Fill sensible defaults if this is a brand-new file.
+        if json["mode"] == nil { json["mode"] = "local" }
+        if json["host"] == nil { json["host"] = "" }
+        if json["port"] == nil { json["port"] = 0 }
+        if json["token"] == nil { json["token"] = "" }
+        guard let out = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) else {
+            return false
+        }
+        do {
+            try out.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Removes `--<flag>` and its value from the args array (for global flags
+    /// that must be peeled off before subcommand dispatch).
+    private static func stripFlag(args: [String], flag: String) -> [String] {
+        var out: [String] = []
+        var i = 0
+        while i < args.count {
+            if args[i] == flag && i + 1 < args.count {
+                i += 2
+                continue
+            }
+            out.append(args[i])
+            i += 1
+        }
+        return out
+    }
+
+    // MARK: - Project subcommand
+
+    private static func handleProject(args: [String], socketPath: String) -> Int32 {
+        let sub = args.first ?? "list"
+        switch sub {
+        case "list", "ls", "":
+            guard let resp = rpcCall(socketPath: socketPath, method: "context.project.list", params: [:]),
+                  let list = resp["projects"] as? [[String: Any]] else {
+                fputs("Error: could not list projects\n", stderr)
+                return 1
+            }
+            if list.isEmpty { print("No projects"); return 0 }
+            let active = currentProjectId.isEmpty ? "default" : currentProjectId
+            for p in list {
+                let id = p["id"] as? String ?? ""
+                let name = p["name"] as? String ?? ""
+                let marker = id == active ? "* " : "  "
+                print("\(marker)\(id.padding(toLength: 36, withPad: " ", startingAt: 0))  \(name)")
+            }
+            return 0
+
+        case "add", "create", "new":
+            guard args.count >= 2 else {
+                fputs("Usage: cmux context project add <name>\n", stderr)
+                return 2
+            }
+            let name = args[1...].joined(separator: " ")
+            let author = resolveAuthor()
+            guard let resp = rpcCall(socketPath: socketPath, method: "context.project.create",
+                                     params: ["name": name, "author": author]),
+                  let id = resp["id"] as? String else {
+                return 1
+            }
+            print("Created project \(id)  \(name)")
+            return 0
+
+        case "use", "switch", "select":
+            guard args.count >= 2 else {
+                fputs("Usage: cmux context project use <id>\n", stderr)
+                return 2
+            }
+            let id = args[1]
+            if !saveProjectIdToConfig(id) {
+                fputs("Warning: could not persist project selection to .cmux_team/connection.json\n", stderr)
+            }
+            print("Active project: \(id)")
+            return 0
+
+        case "rename":
+            guard args.count >= 3 else {
+                fputs("Usage: cmux context project rename <id> <new-name>\n", stderr)
+                return 2
+            }
+            let id = args[1]
+            let name = args[2...].joined(separator: " ")
+            let author = resolveAuthor()
+            guard rpcCall(socketPath: socketPath, method: "context.project.rename",
+                          params: ["id": id, "name": name, "author": author]) != nil else {
+                return 1
+            }
+            print("Renamed \(id) → \(name)")
+            return 0
+
+        case "delete", "rm":
+            guard args.count >= 2 else {
+                fputs("Usage: cmux context project delete <id>\n", stderr)
+                return 2
+            }
+            let id = args[1]
+            let author = resolveAuthor()
+            guard rpcCall(socketPath: socketPath, method: "context.project.delete",
+                          params: ["id": id, "author": author]) != nil else {
+                return 1
+            }
+            print("Deleted project \(id)")
+            return 0
+
+        default:
+            fputs("Unknown project subcommand: \(sub)\n", stderr)
+            fputs("Usage: cmux context project [list|add|use|rename|delete]\n", stderr)
+            return 2
+        }
     }
 
     private static func rpcCallTCP(host: String, port: Int, token: String, method: String, params: [String: Any]) -> Data? {
@@ -706,9 +892,21 @@ enum ContextCLI {
           export                            Export all context as JSON
           import <file>                     Import context from JSON
 
+          project list                      List projects on this connection
+          project add <name>                Create a new project
+          project use <id>                  Select active project (writes to .cmux_team/connection.json)
+          project rename <id> <name>        Rename a project
+          project delete <id>               Delete a project and all its data
+
+        Global flags:
+          --project <id>                    Override active project for this invocation
+
         Attribution:
           Mutations accept --author <id>. If omitted, CMUX_CONTEXT_AUTHOR env var
           or .cmux_team/me.json (user_id field) is used.
+
+        Project scope resolution (highest wins): --project flag → CMUX_CONTEXT_PROJECT
+        env → .cmux_team/connection.json (project_id) → daemon default.
         """
         print(usage)
     }
