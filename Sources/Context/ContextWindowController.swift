@@ -186,9 +186,10 @@ struct ContextWindowView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Tab bar + search
+            // Tab bar + search. The Admin tab appears only for server-wide admins.
             HStack(spacing: 2) {
-                ForEach(ContextPanelTab.allCases) { tab in
+                let tabs = ContextPanelTab.allCases.filter { $0 != .admin || store.isCurrentUserAdmin }
+                ForEach(tabs) { tab in
                     Button(action: { selectedTab = tab }) {
                         HStack(spacing: 4) {
                             Image(systemName: tab.iconName).font(.system(size: 11))
@@ -258,7 +259,7 @@ struct ContextWindowView: View {
             Divider()
 
             // Content
-            if isGated && selectedTab != .settings && selectedTab != .users {
+            if isGated && selectedTab != .settings && selectedTab != .users && selectedTab != .admin {
                 gateBanner()
             } else {
                 switch selectedTab {
@@ -266,6 +267,7 @@ struct ContextWindowView: View {
                 case .documents: docsView
                 case .graph: graphView
                 case .users: usersView
+                case .admin: adminView
                 case .settings: settingsView
                 }
             }
@@ -1259,6 +1261,147 @@ struct ContextWindowView: View {
             try ContextStore.saveProjectConfig(projectRoot: root, config: cfg)
         } catch {
             connectionStatus = "Saved config failed: \(error.localizedDescription)"
+        }
+    }
+
+    // MARK: - Admin tab (server-wide management — visible only to admins)
+
+    private var adminView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("ADMIN CONSOLE").font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary).tracking(0.5)
+                Text("Server-wide user and project management. Only visible to admins.")
+                    .font(.system(size: 10)).foregroundColor(.secondary)
+
+                Divider()
+
+                // All users on the server (admin-only endpoint).
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("ALL USERS (\(store.allUsers.count))")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.secondary).tracking(0.5)
+                        Spacer()
+                        Button { store.refreshAllUsers() } label: {
+                            Image(systemName: "arrow.clockwise").font(.system(size: 10))
+                        }.buttonStyle(.plain)
+                    }
+                    if store.allUsers.isEmpty {
+                        Text("No users").font(.system(size: 11)).foregroundColor(.secondary)
+                    } else {
+                        ForEach(store.allUsers) { u in
+                            HStack(spacing: 8) {
+                                Image(systemName: u.isAdmin ? "star.fill" : "person.fill")
+                                    .foregroundColor(u.isAdmin ? .yellow : .secondary)
+                                    .font(.system(size: 11))
+                                VStack(alignment: .leading, spacing: 1) {
+                                    HStack(spacing: 6) {
+                                        Text(u.name).font(.system(size: 12))
+                                        if u.isAdmin {
+                                            Text("ADMIN").font(.system(size: 8, weight: .bold))
+                                                .foregroundColor(.yellow)
+                                                .padding(.horizontal, 4).padding(.vertical, 1)
+                                                .background(Color.yellow.opacity(0.15)).cornerRadius(3)
+                                        }
+                                    }
+                                    if !u.role.isEmpty {
+                                        Text(u.role).font(.system(size: 10)).foregroundColor(.secondary)
+                                    }
+                                    Text("id: \(u.id.prefix(8))")
+                                        .font(.system(size: 9, design: .monospaced))
+                                        .foregroundColor(.secondary.opacity(0.6))
+                                }
+                                Spacer()
+                                if u.id == store.currentUser?.id {
+                                    Text("you").font(.system(size: 9)).foregroundColor(.green)
+                                        .padding(.horizontal, 5).padding(.vertical, 1)
+                                        .background(Color.green.opacity(0.15)).cornerRadius(3)
+                                } else {
+                                    Button(u.isAdmin ? "Revoke admin" : "Make admin") {
+                                        store.setUserAdmin(id: u.id, isAdmin: !u.isAdmin)
+                                    }
+                                    .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(.accentColor)
+                                }
+                            }
+                            .padding(.vertical, 4)
+                            Divider()
+                        }
+                    }
+                }
+
+                Divider()
+
+                // Per-project membership overview.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("PROJECTS & MEMBERS").font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.secondary).tracking(0.5)
+                    Text("Password and membership management per project. Use the lock button to set/change/remove the password.")
+                        .font(.system(size: 10)).foregroundColor(.secondary)
+
+                    ForEach(store.projects) { p in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Image(systemName: "folder").foregroundColor(.accentColor).font(.system(size: 11))
+                                Text(p.name).font(.system(size: 12, weight: .semibold))
+                                if p.hasPassword {
+                                    Image(systemName: "lock.fill").foregroundColor(.yellow).font(.system(size: 10))
+                                } else {
+                                    Image(systemName: "lock.open").foregroundColor(.secondary).font(.system(size: 10))
+                                }
+                                Spacer()
+                                Button(p.hasPassword ? "Change password" : "Set password") {
+                                    passwordSheetProject = p
+                                    passwordSheetInput = ""
+                                }
+                                .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(.accentColor)
+                                if p.hasPassword {
+                                    Button("Clear") {
+                                        store.setProjectPassword(id: p.id, password: "")
+                                    }
+                                    .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(.red.opacity(0.8))
+                                }
+                            }
+                            // Inline member list (loaded lazily when this project is active).
+                            if p.id == effectiveProjectId {
+                                ForEach(store.currentProjectMembers) { m in
+                                    HStack(spacing: 8) {
+                                        Text("•").foregroundColor(.secondary)
+                                        Text(store.allUsers.first(where: { $0.id == m.userId })?.name
+                                             ?? store.users.first(where: { $0.id == m.userId })?.name
+                                             ?? String(m.userId.prefix(8)))
+                                            .font(.system(size: 11))
+                                        if !m.role.isEmpty {
+                                            Text(m.role).font(.system(size: 9)).foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        if m.userId != store.currentUser?.id {
+                                            Button("Remove") {
+                                                store.leaveProject(id: p.id, userId: m.userId)
+                                            }
+                                            .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(.red.opacity(0.8))
+                                        }
+                                    }
+                                    .padding(.leading, 18)
+                                }
+                            } else {
+                                Button("Load members") { store.switchProject(id: p.id) }
+                                    .font(.system(size: 10)).buttonStyle(.plain).foregroundColor(.secondary)
+                                    .padding(.leading, 18)
+                            }
+                        }
+                        .padding(8)
+                        .background(Color.secondary.opacity(0.05))
+                        .cornerRadius(6)
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .onAppear {
+            store.refreshAllUsers()
+            store.refreshProjects()
+            store.refreshProjectMembers()
         }
     }
 

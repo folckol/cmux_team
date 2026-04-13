@@ -380,9 +380,27 @@ func (s *contextServer) handleUserCreate(req rpcRequest) rpcResponse {
 	return okResponse(req.ID, u)
 }
 
+// handleUserList scopes by default to members of the active project
+// (the Users tab shows "team on this project"). Pass `all: true` to get
+// the server-wide list (admin-only; used by the Admin panel).
 func (s *contextServer) handleUserList(req rpcRequest) rpcResponse {
 	caller := callerParam(req.Params)
-	users, err := s.store.VisibleUsers(caller)
+	all, _ := req.Params["all"].(bool)
+	if all {
+		if !s.store.IsAdmin(caller) {
+			return errResponse(req.ID, "forbidden", "only admins may list all users")
+		}
+		users, err := s.store.UserList()
+		if err != nil {
+			return errResponse(req.ID, "internal", err.Error())
+		}
+		if users == nil {
+			users = []User{}
+		}
+		return okResponse(req.ID, map[string]any{"users": users, "count": len(users)})
+	}
+	project := projectParam(req.Params)
+	users, err := s.store.UsersInProject(project)
 	if err != nil {
 		return errResponse(req.ID, "internal", err.Error())
 	}

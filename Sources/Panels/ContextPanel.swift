@@ -93,6 +93,7 @@ enum ContextPanelTab: String, CaseIterable, Identifiable {
     case documents
     case graph
     case users
+    case admin
     case settings
 
     var id: String { rawValue }
@@ -103,6 +104,7 @@ enum ContextPanelTab: String, CaseIterable, Identifiable {
         case .documents: return String(localized: "context.tab.docs", defaultValue: "Documents")
         case .graph: return String(localized: "context.tab.graph", defaultValue: "Graph")
         case .users: return String(localized: "context.tab.users", defaultValue: "Users")
+        case .admin: return String(localized: "context.tab.admin", defaultValue: "Admin")
         case .settings: return String(localized: "context.tab.settings", defaultValue: "Settings")
         }
     }
@@ -113,6 +115,7 @@ enum ContextPanelTab: String, CaseIterable, Identifiable {
         case .documents: return "doc.text"
         case .graph: return "point.3.connected.trianglepath.dotted"
         case .users: return "person.2"
+        case .admin: return "shield.lefthalf.filled"
         case .settings: return "gearshape"
         }
     }

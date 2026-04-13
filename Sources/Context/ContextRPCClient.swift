@@ -222,6 +222,14 @@ final class ContextRPCClient: @unchecked Sendable {
         }
     }
 
+    /// Server-wide user list (admin-only on the daemon side).
+    func userListAll(completion: @escaping (Result<[ContextUser], ContextRPCError>) -> Void) {
+        call(method: "context.user.list", params: ["all": true] as [String: Any]) {
+            (result: Result<UserListResponse, ContextRPCError>) in
+            completion(result.map(\.users))
+        }
+    }
+
     func userCreate(id: String = "", name: String, role: String, email: String = "", completion: @escaping (Result<ContextUser, ContextRPCError>) -> Void) {
         call(method: "context.user.create", params: [
             "id": id, "name": name, "role": role, "email": email

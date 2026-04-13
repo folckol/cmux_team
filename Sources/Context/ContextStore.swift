@@ -13,6 +13,9 @@ final class ContextStore: ObservableObject {
     @Published var edges: [ContextEdge] = []
     @Published var searchResults: [ContextSearchResult] = []
     @Published var users: [ContextUser] = []
+    /// Server-wide user list. Populated only for admins (via refreshAllUsers),
+    /// used by the Admin tab. Non-admins leave this empty.
+    @Published var allUsers: [ContextUser] = []
     @Published var events: [ContextEvent] = []
     @Published var locks: [ContextLock] = []
     @Published var projects: [ContextProject] = []
@@ -506,6 +509,27 @@ final class ContextStore: ObservableObject {
                 case .success(let users):
                     self?.users = users
                 case .failure(let error):
+                    if self?.handleAccessError(error) == true { return }
+                    self?.lastError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    /// Server-wide user list for the Admin tab. Daemon enforces admin-only.
+    func refreshAllUsers() {
+        rpcClient.userListAll { [weak self] result in
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let users):
+                    self?.allUsers = users
+                case .failure(let error):
+                    // Silently drop non-admin refusals so the store stays quiet
+                    // for non-admin users — they simply won't have an Admin tab.
+                    if case .serverError(let code, _) = error, code == "forbidden" {
+                        self?.allUsers = []
+                        return
+                    }
                     self?.lastError = error.localizedDescription
                 }
             }
