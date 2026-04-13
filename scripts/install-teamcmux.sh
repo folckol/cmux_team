@@ -47,7 +47,24 @@ sleep 0.3
 rm -rf "$DEST"
 cp -R "$SRC_APP" "$DEST"
 
-echo "==> [4/5] Rebranding bundle (name + bundle id)"
+echo "==> [3.5/6] Copying auxiliary bin scripts into bundle"
+# Xcode's "Copy CLI" build phase only ships `claude` (and `open`) into
+# Resources/bin/. The `claude` wrapper expects a sibling `cmux-context-inject`
+# to feed the team context (and the project system_prompt.md) into Claude via
+# --append-system-prompt. Without it the per-project rules in
+# `.cmux_team/system_prompt.md` are silently ignored — the agent starts with
+# no team-context awareness at all.
+for aux in cmux-context-inject; do
+    src_aux="${PROJECT_DIR}/Resources/bin/${aux}"
+    dst_aux="${DEST}/Contents/Resources/bin/${aux}"
+    if [[ -f "$src_aux" ]]; then
+        cp "$src_aux" "$dst_aux"
+        chmod +x "$dst_aux"
+        echo "  + ${aux}"
+    fi
+done
+
+echo "==> [4/6] Rebranding bundle (name + bundle id)"
 PLIST="${DEST}/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleName ${APP_NAME}" "$PLIST" 2>/dev/null \
   || /usr/libexec/PlistBuddy -c "Add :CFBundleName string ${APP_NAME}" "$PLIST"
